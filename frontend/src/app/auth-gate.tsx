@@ -1,17 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { API } from "./lib";
 
-type G = { accounts: { id: { initialize: (o: object) => void; renderButton: (el: HTMLElement, o: object) => void } } };
-declare global { interface Window { google?: G } }
+const post = (path: string, body: object) =>
+  fetch(`${API}${path}`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
-/** Blocks the app until the user has signed in with an allow-listed Google account. */
+/** Blocks the app until the user signs in with an emailed one-time code (allow-listed emails only). */
 export default function AuthGate({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<"loading" | "out" | "in">("loading");
+  const [state, setState] = useState<"loading" | "email" | "code" | "in">("loading");
   const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
   const [err, setErr] = useState("");
-  const btn = useRef<HTMLDivElement>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -20,41 +21,50 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
         if (!cfg.enabled) { setState("in"); return; }
         const me = await fetch(`${API}/auth/me`, { credentials: "include" });
         if (me.ok) { setEmail((await me.json()).email); setState("in"); return; }
-        setState("out");
-        const s = document.createElement("script");
-        s.src = "https://accounts.google.com/gsi/client";
-        s.async = true;
-        s.onload = () => {
-          window.google!.accounts.id.initialize({
-            client_id: cfg.client_id,
-            callback: async (resp: { credential: string }) => {
-              const r = await fetch(`${API}/auth/login`, {
-                method: "POST", credentials: "include",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ credential: resp.credential }),
-              });
-              if (r.ok) { setEmail((await r.json()).email); setState("in"); }
-              else setErr((await r.json().catch(() => ({}))).detail ?? "Sign-in failed");
-            },
-          });
-          if (btn.current) window.google!.accounts.id.renderButton(btn.current, { theme: "filled_black", size: "large", shape: "pill" });
-        };
-        document.head.appendChild(s);
-      } catch { setErr("Cannot reach the server."); setState("out"); }
+        setState("email");
+      } catch { setErr("Cannot reach the server."); setState("email"); }
     })();
   }, []);
 
+  async function sendCode(e: React.FormEvent) {
+    e.preventDefault(); setBusy(true); setErr("");
+    const r = await post("/auth/request", { email });
+    setBusy(false);
+    if (r.ok) setState("code"); else setErr((await r.json().catch(() => ({}))).detail ?? "Could not send a code.");
+  }
+
+  async function verify(e: React.FormEvent) {
+    e.preventDefault(); setBusy(true); setErr("");
+    const r = await post("/auth/verify", { email, code });
+    setBusy(false);
+    if (r.ok) setState("in"); else setErr((await r.json().catch(() => ({}))).detail ?? "Sign-in failed.");
+  }
+
   if (state === "loading") return null;
-  if (state === "out") {
+  if (state === "email" || state === "code") {
+    const field = { padding: "10px 14px", borderRadius: 10, border: "1px solid #444", background: "transparent", color: "inherit", width: 280 };
+    const go = { padding: "10px 20px", borderRadius: 999, border: 0, cursor: "pointer", fontWeight: 600 };
     return (
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>
-        <div style={{ textAlign: "center", display: "grid", gap: 16, justifyItems: "center" }}>
+        <form onSubmit={state === "email" ? sendCode : verify} style={{ textAlign: "center", display: "grid", gap: 14, justifyItems: "center" }}>
           <div className="brand-mark">N</div>
           <h1 style={{ fontSize: 22 }}>Reel Reviewer</h1>
-          <div className="faint">Sign in with an authorised Google account</div>
-          <div ref={btn} id="google-signin" />
+          {state === "email" ? (
+            <>
+              <div className="faint">Enter your authorised email to get a sign-in code</div>
+              <input id="login-email" type="email" required autoFocus placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} style={field} />
+              <button id="login-send" style={go} disabled={busy}>{busy ? "Sending…" : "Send code"}</button>
+            </>
+          ) : (
+            <>
+              <div className="faint">If {email} is authorised, a 6-digit code is on its way (valid 10 minutes).</div>
+              <input id="login-code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} required autoFocus placeholder="123456" value={code} onChange={(e) => setCode(e.target.value)} style={{ ...field, textAlign: "center", letterSpacing: 6 }} />
+              <button id="login-verify" style={go} disabled={busy}>{busy ? "Checking…" : "Sign in"}</button>
+              <button type="button" className="faint" style={{ background: "none", border: 0, cursor: "pointer" }} onClick={() => { setState("email"); setCode(""); setErr(""); }}>Use a different email</button>
+            </>
+          )}
           {err && <div role="alert" style={{ color: "#f87171" }}>{err}</div>}
-        </div>
+        </form>
       </div>
     );
   }

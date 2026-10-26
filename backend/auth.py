@@ -1,39 +1,49 @@
-"""Google sign-in + email allowlist. Fail-closed: the server refuses to listen publicly without it.
+"""Email one-time-code login + allowlist. Fail-closed: the server refuses to listen publicly without it.
 
-Flow: browser gets a Google ID token (Google Identity Services) -> POST /auth/login -> we verify the token
-signature/audience/expiry with Google's keys, check the email against ALLOWED_EMAILS, and set a signed,
-HttpOnly, SameSite session cookie. Every /api/* call is then checked by `middleware`.
+Flow: user enters email -> if it is on ALLOWED_EMAILS we mail a 6-digit code (valid 10 min, 5 tries, single use)
+-> POST /auth/verify -> signed, HttpOnly, SameSite session cookie. Every /api/* call is checked by `middleware`.
+The response to /auth/request is identical for allowed and unknown emails, so the allowlist can't be probed.
 """
 import os
+import ssl
 import time
 import hmac
 import base64
 import hashlib
 import secrets
+import smtplib
+import threading
+from email.message import EmailMessage
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 ALLOWED = {e.strip().lower() for e in os.environ.get("ALLOWED_EMAILS", "").split(",") if e.strip()}
 SESSION_HOURS = int(os.environ.get("SESSION_HOURS", "12"))
+CODE_TTL = 600
 COOKIE = "rr_session"
-_secret = os.environ.get("SESSION_SECRET", "")
-if not _secret:
-    _secret = secrets.token_urlsafe(48)  # per-process: sessions reset on restart (set SESSION_SECRET to persist)
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+SMTP_FROM = os.environ.get("SMTP_FROM", "") or SMTP_USER
+_secret = os.environ.get("SESSION_SECRET", "") or secrets.token_urlsafe(48)  # unset: sessions reset on restart
 SECRET = _secret.encode()
-ENABLED = bool(CLIENT_ID)
+ENABLED = bool(ALLOWED)
 
 router = APIRouter()
+_lock = threading.Lock()
+_codes: dict[str, dict] = {}        # email -> {h, exp, tries, sent}
+_ip_hits: dict[str, list[float]] = {}
 
 
 def check_startup(host: str):
-    """Never expose the API publicly without auth, and never with auth but an empty allowlist."""
+    """Never expose the API publicly without auth, nor with auth but no way to deliver codes."""
     local = host in ("127.0.0.1", "localhost", "::1")
     if not ENABLED and not local:
-        raise SystemExit("Refusing to start: HOST is public but GOOGLE_CLIENT_ID is not set (auth disabled).")
-    if ENABLED and not ALLOWED:
-        raise SystemExit("Refusing to start: GOOGLE_CLIENT_ID is set but ALLOWED_EMAILS is empty.")
+        raise SystemExit("Refusing to start: HOST is public but ALLOWED_EMAILS is not set (auth disabled).")
+    if ENABLED and not local and not (SMTP_HOST and SMTP_USER and SMTP_PASS):
+        raise SystemExit("Refusing to start: public HOST needs SMTP_HOST/SMTP_USER/SMTP_PASS to email login codes.")
 
 
 def _sign(msg: str) -> str:
@@ -75,9 +85,39 @@ async def middleware(request: Request, call_next):
     return await call_next(request)
 
 
+def _hash(email: str, code: str) -> str:
+    return _sign(f"{email}:{code}")
+
+
+def _send(email: str, code: str):
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
+        print(f"[auth] DEV MODE (no SMTP configured) - login code for {email}: {code}", flush=True)
+        return
+    try:
+        m = EmailMessage()
+        m["Subject"] = f"Reel Reviewer sign-in code: {code}"
+        m["From"], m["To"] = SMTP_FROM, email
+        m.set_content(f"Your sign-in code is {code}\n\nIt expires in {CODE_TTL // 60} minutes. "
+                      "If you didn't request it, ignore this email.")
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
+            s.starttls(context=ssl.create_default_context())
+            s.login(SMTP_USER, SMTP_PASS)
+            s.send_message(m)
+    except Exception as e:
+        print(f"[auth] email send failed: {type(e).__name__}", flush=True)
+
+
+def _throttle(ip: str, limit: int, window: int):
+    now = time.time()
+    hits = [t for t in _ip_hits.get(ip, []) if t > now - window]
+    if len(hits) >= limit:
+        raise HTTPException(429, "Too many attempts. Try again in a few minutes.")
+    _ip_hits[ip] = hits + [now]
+
+
 @router.get("/auth/config")
 def config():
-    return {"enabled": ENABLED, "client_id": CLIENT_ID}
+    return {"enabled": ENABLED}
 
 
 @router.get("/auth/me")
@@ -90,31 +130,47 @@ def me(request: Request):
     return {"email": u}
 
 
-class Login(BaseModel):
-    credential: str
+class CodeRequest(BaseModel):
+    email: str
 
 
-_fails: dict[str, list[float]] = {}
+class CodeVerify(BaseModel):
+    email: str
+    code: str
 
 
-@router.post("/auth/login")
-def login(body: Login, request: Request, response: Response):
+@router.post("/auth/request")
+def request_code(body: CodeRequest, request: Request):
     if not ENABLED:
         raise HTTPException(400, "Auth is not enabled")
-    ip = request.client.host if request.client else "?"
-    recent = [t for t in _fails.get(ip, []) if t > time.time() - 600]
-    if len(recent) >= 10:  # brute-force / abuse throttle
-        raise HTTPException(429, "Too many failed sign-ins. Try again in a few minutes.")
-    try:
-        from google.oauth2 import id_token
-        from google.auth.transport import requests as greq
-        info = id_token.verify_oauth2_token(body.credential, greq.Request(), CLIENT_ID)
-        email = (info.get("email") or "").lower()
-        if not info.get("email_verified") or email not in ALLOWED:
-            raise ValueError("not allowed")
-    except Exception:
-        _fails[ip] = recent + [time.time()]
-        raise HTTPException(403, "This Google account is not authorised for this app.")
+    _throttle("req:" + (request.client.host if request.client else "?"), 10, 3600)
+    email = body.email.strip().lower()[:254]
+    if email in ALLOWED:
+        with _lock:
+            old = _codes.get(email)
+            if not old or time.time() - old["sent"] > 60:  # max one code per minute per email
+                code = f"{secrets.randbelow(10**6):06d}"
+                _codes[email] = {"h": _hash(email, code), "exp": time.time() + CODE_TTL, "tries": 0, "sent": time.time()}
+                threading.Thread(target=_send, args=(email, code), daemon=True).start()
+    return {"ok": True}  # same answer whether or not the email is allowed
+
+
+@router.post("/auth/verify")
+def verify_code(body: CodeVerify, request: Request, response: Response):
+    if not ENABLED:
+        raise HTTPException(400, "Auth is not enabled")
+    _throttle("ver:" + (request.client.host if request.client else "?"), 20, 600)
+    email, code = body.email.strip().lower(), body.code.strip()
+    with _lock:
+        rec = _codes.get(email)
+        ok = False
+        if rec and rec["exp"] > time.time() and rec["tries"] < 5:
+            rec["tries"] += 1
+            ok = hmac.compare_digest(rec["h"], _hash(email, code))
+            if ok:
+                del _codes[email]  # single use
+    if not ok or email not in ALLOWED:
+        raise HTTPException(403, "Invalid or expired code.")
     secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
     response.set_cookie(COOKIE, make_token(email), max_age=SESSION_HOURS * 3600, httponly=True,
                         secure=secure, samesite="lax", path="/")

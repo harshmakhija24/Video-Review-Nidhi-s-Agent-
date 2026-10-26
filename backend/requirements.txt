@@ -9,5 +9,3 @@ numpy
 pillow
 av
 google-genai
-google-auth
-requests
