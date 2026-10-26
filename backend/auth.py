@@ -28,6 +28,7 @@ SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 SMTP_FROM = os.environ.get("SMTP_FROM", "") or SMTP_USER
 BREVO_KEY = os.environ.get("BREVO_API_KEY", "")  # HTTPS email API (works where SMTP ports are blocked, e.g. Render free)
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")  # simple mode: email on the allowlist + this shared password
 _secret = os.environ.get("SESSION_SECRET", "") or secrets.token_urlsafe(48)  # unset: sessions reset on restart
 SECRET = _secret.encode()
 ENABLED = bool(ALLOWED)
@@ -43,8 +44,10 @@ def check_startup(host: str):
     local = host in ("127.0.0.1", "localhost", "::1")
     if not ENABLED and not local:
         raise SystemExit("Refusing to start: HOST is public but ALLOWED_EMAILS is not set (auth disabled).")
-    if ENABLED and not local and not (BREVO_KEY and SMTP_FROM) and not (SMTP_HOST and SMTP_USER and SMTP_PASS):
-        raise SystemExit("Refusing to start: public HOST needs BREVO_API_KEY + SMTP_FROM (or SMTP_HOST/SMTP_USER/SMTP_PASS) to email login codes.")
+    if ENABLED and APP_PASSWORD and len(APP_PASSWORD) < 8:
+        raise SystemExit("Refusing to start: APP_PASSWORD must be at least 8 characters.")
+    if ENABLED and not local and not APP_PASSWORD and not (BREVO_KEY and SMTP_FROM) and not (SMTP_HOST and SMTP_USER and SMTP_PASS):
+        raise SystemExit("Refusing to start: public HOST needs APP_PASSWORD (or BREVO_API_KEY + SMTP_FROM) to authenticate users.")
 
 
 def _sign(msg: str) -> str:
@@ -137,7 +140,28 @@ def _throttle(ip: str, limit: int, window: int):
 
 @router.get("/auth/config")
 def config():
-    return {"enabled": ENABLED}
+    return {"enabled": ENABLED, "mode": "password" if APP_PASSWORD else "code"}
+
+
+class PasswordLogin(BaseModel):
+    email: str
+    password: str
+
+
+@router.post("/auth/login")
+def password_login(body: PasswordLogin, request: Request, response: Response):
+    if not (ENABLED and APP_PASSWORD):
+        raise HTTPException(400, "Password login is not enabled")
+    _throttle("pw:" + (request.client.host if request.client else "?"), 10, 600)  # brute-force guard
+    email = body.email.strip().lower()
+    ok = hmac.compare_digest(body.password.encode(), APP_PASSWORD.encode())
+    if not (ok and email in ALLOWED):
+        time.sleep(1)
+        raise HTTPException(403, "Wrong email or password.")
+    secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    response.set_cookie(COOKIE, make_token(email), max_age=SESSION_HOURS * 3600, httponly=True,
+                        secure=secure, samesite="lax", path="/")
+    return {"email": email}
 
 
 @router.get("/auth/me")
@@ -161,8 +185,8 @@ class CodeVerify(BaseModel):
 
 @router.post("/auth/request")
 def request_code(body: CodeRequest, request: Request):
-    if not ENABLED:
-        raise HTTPException(400, "Auth is not enabled")
+    if not ENABLED or APP_PASSWORD:
+        raise HTTPException(400, "Code login is not enabled")
     _throttle("req:" + (request.client.host if request.client else "?"), 10, 3600)
     email = body.email.strip().lower()[:254]
     if email in ALLOWED:
@@ -177,8 +201,8 @@ def request_code(body: CodeRequest, request: Request):
 
 @router.post("/auth/verify")
 def verify_code(body: CodeVerify, request: Request, response: Response):
-    if not ENABLED:
-        raise HTTPException(400, "Auth is not enabled")
+    if not ENABLED or APP_PASSWORD:
+        raise HTTPException(400, "Code login is not enabled")
     _throttle("ver:" + (request.client.host if request.client else "?"), 20, 600)
     email, code = body.email.strip().lower(), body.code.strip()
     with _lock:

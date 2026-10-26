@@ -11,6 +11,8 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<"loading" | "email" | "code" | "in">("loading");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
+  const [pw, setPw] = useState("");
+  const [mode, setMode] = useState<"code" | "password">("code");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -19,6 +21,7 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       try {
         const cfg = await (await fetch(`${API}/auth/config`, { credentials: "include" })).json();
         if (!cfg.enabled) { setState("in"); return; }
+        setMode(cfg.mode === "password" ? "password" : "code");
         const me = await fetch(`${API}/auth/me`, { credentials: "include" });
         if (me.ok) { setEmail((await me.json()).email); setState("in"); return; }
         setState("email");
@@ -28,6 +31,12 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
 
   async function sendCode(e: React.FormEvent) {
     e.preventDefault(); setBusy(true); setErr("");
+    if (mode === "password") {
+      const r = await post("/auth/login", { email, password: pw });
+      setBusy(false);
+      if (r.ok) setState("in"); else setErr((await r.json().catch(() => ({}))).detail ?? "Sign-in failed.");
+      return;
+    }
     const r = await post("/auth/request", { email });
     setBusy(false);
     if (r.ok) setState("code"); else setErr((await r.json().catch(() => ({}))).detail ?? "Could not send a code.");
@@ -51,9 +60,10 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
           <h1 style={{ fontSize: 22 }}>Reel Reviewer</h1>
           {state === "email" ? (
             <>
-              <div className="faint">Enter your authorised email to get a sign-in code</div>
+              <div className="faint">{mode === "password" ? "Enter your authorised email and the access password" : "Enter your authorised email to get a sign-in code"}</div>
               <input id="login-email" type="email" required autoFocus placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} style={field} />
-              <button id="login-send" style={go} disabled={busy}>{busy ? "Sending…" : "Send code"}</button>
+              {mode === "password" && <input id="login-password" type="password" required placeholder="Password" value={pw} onChange={(e) => setPw(e.target.value)} style={field} />}
+              <button id="login-send" style={go} disabled={busy}>{busy ? "Please wait…" : mode === "password" ? "Sign in" : "Send code"}</button>
             </>
           ) : (
             <>
