@@ -27,6 +27,7 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
 SMTP_FROM = os.environ.get("SMTP_FROM", "") or SMTP_USER
+BREVO_KEY = os.environ.get("BREVO_API_KEY", "")  # HTTPS email API (works where SMTP ports are blocked, e.g. Render free)
 _secret = os.environ.get("SESSION_SECRET", "") or secrets.token_urlsafe(48)  # unset: sessions reset on restart
 SECRET = _secret.encode()
 ENABLED = bool(ALLOWED)
@@ -42,8 +43,8 @@ def check_startup(host: str):
     local = host in ("127.0.0.1", "localhost", "::1")
     if not ENABLED and not local:
         raise SystemExit("Refusing to start: HOST is public but ALLOWED_EMAILS is not set (auth disabled).")
-    if ENABLED and not local and not (SMTP_HOST and SMTP_USER and SMTP_PASS):
-        raise SystemExit("Refusing to start: public HOST needs SMTP_HOST/SMTP_USER/SMTP_PASS to email login codes.")
+    if ENABLED and not local and not (BREVO_KEY and SMTP_FROM) and not (SMTP_HOST and SMTP_USER and SMTP_PASS):
+        raise SystemExit("Refusing to start: public HOST needs BREVO_API_KEY + SMTP_FROM (or SMTP_HOST/SMTP_USER/SMTP_PASS) to email login codes.")
 
 
 def _sign(msg: str) -> str:
@@ -89,7 +90,26 @@ def _hash(email: str, code: str) -> str:
     return _sign(f"{email}:{code}")
 
 
+def _send_brevo(email: str, code: str):
+    import json
+    import urllib.request
+    body = json.dumps({"sender": {"email": SMTP_FROM, "name": "Reel Reviewer"}, "to": [{"email": email}],
+                       "subject": f"Reel Reviewer sign-in code: {code}",
+                       "textContent": f"Your sign-in code is {code}\n\nIt expires in {CODE_TTL // 60} minutes. "
+                                      "If you didn't request it, ignore this email."}).encode()
+    req = urllib.request.Request("https://api.brevo.com/v3/smtp/email", data=body, method="POST",
+                                 headers={"api-key": BREVO_KEY, "content-type": "application/json", "accept": "application/json"})
+    urllib.request.urlopen(req, timeout=20).read()
+
+
 def _send(email: str, code: str):
+    if BREVO_KEY and SMTP_FROM:
+        try:
+            _send_brevo(email, code)
+            print(f"[auth] code emailed via Brevo to {email}", flush=True)
+        except Exception as e:
+            print(f"[auth] Brevo send failed: {type(e).__name__} {getattr(e, 'read', lambda: b'')()[:200]}", flush=True)
+        return
     if not (SMTP_HOST and SMTP_USER and SMTP_PASS):
         print(f"[auth] DEV MODE (no SMTP configured) - login code for {email}: {code}", flush=True)
         return
