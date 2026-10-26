@@ -178,7 +178,7 @@ def transcribe(wav_path: str) -> dict:
     global _local_whisper
     from faster_whisper import WhisperModel
     if _local_whisper is None:
-        _local_whisper = WhisperModel("base", device="cpu", compute_type="int8")
+        _local_whisper = WhisperModel(os.environ.get("WHISPER_MODEL", "tiny"), device="cpu", compute_type="int8")
     segs, _ = _local_whisper.transcribe(wav_path, language="en", word_timestamps=True)
     words, text = [], []
     for s in segs:

@@ -14,7 +14,7 @@ WORKDIR /app
 COPY backend/requirements.txt backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 # Bake the local Whisper fallback model into the image so the first review isn't slow
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8')"
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8')"
 COPY backend/ backend/
 COPY --from=web /web/out frontend/out
 # A persistent disk mounted at backend/data hides files shipped in the image, so keep a seed copy of the rulebook
