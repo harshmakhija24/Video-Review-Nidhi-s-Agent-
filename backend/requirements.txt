@@ -3,7 +3,9 @@ uvicorn
 faster-whisper
 yt-dlp
 groq
-pysrt
-python-multipart
 python-dotenv
 pydantic
+numpy
+pillow
+av
+google-genai
