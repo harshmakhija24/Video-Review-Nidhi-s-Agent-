@@ -24,7 +24,7 @@ MAX_WAIT = 90  # seconds; a longer retry-after means a daily cap -> move to the 
 # prompt + max_tokens against TPM, so keep every request well under 8K or it is rejected outright.
 # qwen (vision) also has 200K tokens/day (rolling) - that is the real throughput limit (~14 reels/day).
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"), max_retries=0, timeout=180)
+client = Groq(api_key=os.environ.get("GROQ_API_KEY") or "missing-key", max_retries=0, timeout=180)  # missing key: calls fail cleanly, server still boots
 _exhausted: dict[str, float] = {}  # model -> unix time until which we skip it
 _lock = threading.Lock()
 
