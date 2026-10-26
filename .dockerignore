@@ -1,0 +1,11 @@
+.git
+**/node_modules
+**/.next
+frontend/out
+backend/venv
+backend/.env
+backend/__pycache__
+backend/data/*
+!backend/data/rulebook.json
+*.docx
+*.srt
