@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
 import Nav from "./nav";
+import AuthGate from "./auth-gate";
 import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
@@ -16,6 +17,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable} ${serif.variable}`}>
       <body suppressHydrationWarning>
+        <AuthGate>
         <div className="shell">
           <aside className="sidebar">
             <div className="brand">
@@ -33,6 +35,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
           </aside>
           <main className="main">{children}</main>
         </div>
+        </AuthGate>
       </body>
     </html>
   );

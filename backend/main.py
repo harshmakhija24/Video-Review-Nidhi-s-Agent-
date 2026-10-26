@@ -21,8 +21,11 @@ from pydantic import BaseModel
 import nidhi
 import review
 import gemini
+import auth
 
-app = FastAPI(title="FDP Reel Reviewer")
+app = FastAPI(title="FDP Reel Reviewer", docs_url=None, redoc_url=None, openapi_url=None)
+app.middleware("http")(auth.middleware)
+app.include_router(auth.router)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
                    allow_methods=["*"], allow_headers=["*"])
 MAX_URLS = 50       # per request
@@ -299,4 +302,6 @@ def serve_frontend(full_path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", 8000)), access_log=False)
+    _host = os.environ.get("HOST", "127.0.0.1")
+    auth.check_startup(_host)
+    uvicorn.run(app, host=_host, port=int(os.environ.get("PORT", 8000)), access_log=False)
