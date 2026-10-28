@@ -785,9 +785,6 @@ function NotesRepoContent() {
     let unreviewed = 0;
 
     for (const item of itemsList) {
-      if (item.round === 1) round1++;
-      if (item.round > 1) round2++;
-
       const total = item.notes.length;
       const editorCount = item.notes.filter((n) => n.editor_done).length;
       const nidhiCount = item.notes.filter((n) => n.nidhi_verified).length;
@@ -795,6 +792,10 @@ function NotesRepoContent() {
       const isReadyNidhi = total > 0 && editorCount === total && !isApproved;
       const isPendingEditor = total > 0 && editorCount < total;
       const isUnreviewed = (total === 0 && item.status !== "approved") || item.status === "unreviewed";
+      const isActiveReview = !isApproved && !isUnreviewed;
+
+      if (item.round === 1 && isActiveReview) round1++;
+      if (item.round > 1 && isActiveReview) round2++;
 
       if (isApproved) {
         approved++;
@@ -820,9 +821,10 @@ function NotesRepoContent() {
       const isReadyNidhi = total > 0 && editorCount === total && !isApproved;
       const isPendingEditor = total > 0 && editorCount < total;
       const isUnreviewed = (total === 0 && item.status !== "approved") || item.status === "unreviewed";
+      const isActiveReview = !isApproved && !isUnreviewed;
 
-      if (filter === "round_1" && item.round !== 1) return false;
-      if (filter === "round_2" && item.round <= 1) return false;
+      if (filter === "round_1" && (item.round !== 1 || !isActiveReview)) return false;
+      if (filter === "round_2" && (item.round <= 1 || !isActiveReview)) return false;
       if (filter === "pending_editor" && !isPendingEditor) return false;
       if (filter === "ready_nidhi" && !isReadyNidhi) return false;
       if (filter === "approved" && !isApproved) return false;
