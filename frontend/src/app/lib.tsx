@@ -25,10 +25,61 @@ export type Job = {
   verdict?: string; notes?: number; error?: string; created: number; writer?: string; retry_at?: number; partial?: boolean;
 };
 
+export type RevisionNote = {
+  id: string;
+  t: number;
+  end: number;
+  note: string;
+  category: string;
+  severity: "high" | "medium" | "low";
+  basis: string;
+  rule?: string;
+  editor_done: boolean;
+  editor_comment?: string;
+  nidhi_verified: boolean;
+  nidhi_comment?: string;
+};
+
+export type RevisionRound = {
+  round: number;
+  completed_at: string;
+  notes: RevisionNote[];
+  total: number;
+  editor_done: number;
+  nidhi_verified: number;
+};
+
+export type RevisionItem = {
+  reel: string;
+  file_id: string;
+  editor: string;
+  round: number;
+  status: "pending_fixes" | "ready_for_review" | "approved";
+  notes: RevisionNote[];
+  history?: RevisionRound[];
+  url?: string;
+  created_at?: string;
+  updated_at?: number;
+  v2_video?: {
+    file_id: string;
+    name: string;
+    url: string;
+    confirmed: boolean;
+    confirmed_at: string;
+  };
+};
+
 export type Reel = {
   reel: string; status: string; editor: string; notes: string; link: string; file_id: string | null;
   drive_name: string | null; version: number | null;
   agent: { verdict: string; notes: number; created: string } | null; job: Job | null;
+  revision?: {
+    round: number;
+    status: "pending_fixes" | "ready_for_review" | "approved";
+    total: number;
+    editor_done: number;
+    nidhi_verified: number;
+  } | null;
 };
 
 export type Note = {
@@ -83,6 +134,9 @@ export const Icon = {
   x: P(<path d="M6 6l12 12M18 6L6 18" />),
   alert: P(<><path d="M12 3l9.5 17h-19z" /><path d="M12 10v4M12 17.5v.01" /></>),
   copy: P(<><rect x="8" y="8" width="12" height="12" rx="2.5" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>),
+  checklist: P(<><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" /><path d="M4 8h4M4 12h3M4 16h4" /></>),
+  plus: P(<><path d="M12 5v14M5 12h14" /></>),
+  history: P(<><path d="M12 8v4l3 3" /><circle cx="12" cy="12" r="9" /><path d="M3.05 11a9 9 0 0 1 .5-2m-.5 2H7" /></>),
   back: P(<path d="M15 5l-7 7 7 7" />),
   down: P(<path d="M6 9l6 6 6-6" />),
   spark: P(<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z" />),

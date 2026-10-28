@@ -1,4 +1,4 @@
-﻿"""Everything Nidhi-specific: the review sheet, her rulebook (observed + predicted), notes in her voice, backtest."""
+"""Everything Nidhi-specific: the review sheet, her rulebook (observed + predicted), notes in her voice, backtest."""
 import re
 import csv
 import io
@@ -84,24 +84,88 @@ def drive_files() -> dict:
     return _cached("drive_files.json", fetch)
 
 
+def find_v2_candidates(reel_name: str) -> list[dict]:
+    """Finds all Drive files matching reel_name and their version tags."""
+    def fetch_all():
+        html = _get(FOLDER_URL)
+        out = []
+        for fid, tip in re.findall(r'data-id="([\w-]{20,})"[^>]*data-tooltip="([^"]+)"', html):
+            fname = tip.rsplit(" ", 1)[0]
+            clean = re.sub(r"\s+", "", fname).removesuffix(".mp4").strip("_")
+            m = re.search(r"_v(\d+)$", clean)
+            base = clean[:m.start()] if m else clean
+            ver = int(m.group(1)) if m else 1
+            out.append({
+                "base": base,
+                "version": ver,
+                "name": fname,
+                "id": fid,
+                "url": f"https://drive.google.com/file/d/{fid}/view"
+            })
+        return out
+    all_files = _cached("drive_files_all.json", fetch_all)
+    matches = [f for f in all_files if f["base"] == reel_name or reel_name in f["name"]]
+    matches.sort(key=lambda x: x["version"], reverse=True)
+    return matches
+
+
 def reels() -> list[dict]:
-    """Sheet rows merged with Drive files."""
+    """Sheet rows merged with Drive files, prioritizing user-confirmed v2 videos."""
     def fetch():
         rows = list(csv.reader(io.StringIO(_get(SHEET_CSV))))
         start = next(i for i, r in enumerate(rows) if r and r[0].strip().lower() == "reels") + 1
         return [r for r in rows[start:] if r and r[0].strip()]
     rows = _cached("sheet.json", fetch)
     files = drive_files()
+
+    rev_p = DATA / "revisions.json"
+    rev_data = json.loads(rev_p.read_text(encoding="utf-8")) if rev_p.exists() else {}
+
     out = []
     for r in rows:
         r = (r + [""] * 6)[:6]
         name = r[0].strip()
         f = files.get(name)
         link = r[5].strip() or (f"https://drive.google.com/file/d/{f['id']}/view" if f else "")
+        fid = review.file_id(link) if link else None
+        dname = f["name"] if f else None
+        ver = f["version"] if f else None
+
+        # If a locked v2 video was confirmed by user, prioritize it permanently
+        locked_v2 = rev_data.get(name, {}).get("v2_video")
+        if locked_v2 and locked_v2.get("confirmed"):
+            link = locked_v2.get("url") or link
+            fid = locked_v2.get("file_id") or fid
+            dname = locked_v2.get("name") or dname
+            ver = 2
+
         out.append({"reel": name, "status": r[2].strip(), "editor": r[3].strip(), "notes": r[4].strip(),
-                    "link": link, "file_id": review.file_id(link) if link else None,
-                    "drive_name": f["name"] if f else None, "version": f["version"] if f else None})
+                    "link": link, "file_id": fid,
+                    "drive_name": dname, "version": ver,
+                    "v2_confirmed": bool(locked_v2 and locked_v2.get("confirmed"))})
     return out
+
+
+def sync_sheet_and_drive() -> list[dict]:
+    """Force fresh fetch from Google Sheets CSV and Google Drive folder."""
+    rows_raw = list(csv.reader(io.StringIO(_get(SHEET_CSV))))
+    start = next(i for i, r in enumerate(rows_raw) if r and r[0].strip().lower() == "reels") + 1
+    sheet_rows = [r for r in rows_raw[start:] if r and r[0].strip()]
+    (DATA / "sheet.json").write_text(json.dumps(sheet_rows, indent=1, ensure_ascii=False), encoding="utf-8")
+
+    html = _get(FOLDER_URL)
+    files = {}
+    for fid, tip in re.findall(r'data-id="([\w-]{20,})"[^>]*data-tooltip="([^"]+)"', html):
+        name = re.sub(r"\s+", "", tip.rsplit(" ", 1)[0]).removesuffix(".mp4").strip("_")
+        if not re.match(r"\d", name):
+            continue
+        m = re.search(r"_v(\d+)$", name)
+        base, ver = (name[:m.start()], int(m.group(1))) if m else (name, 1)
+        if base not in files or ver > files[base]["version"]:
+            files[base] = {"id": fid, "name": tip.rsplit(" ", 1)[0], "version": ver}
+    (DATA / "drive_files.json").write_text(json.dumps(files, indent=1, ensure_ascii=False), encoding="utf-8")
+
+    return reels()
 
 
 # ---------- rulebook ----------
@@ -354,7 +418,10 @@ def run(url: str, meta: dict | None = None, progress=None) -> dict:
     if progress:
         progress("writing", 0)
     rep = write_review(facts, meta)
-    (review.CACHE / facts["file_id"] / "report.json").write_text(json.dumps(rep, indent=1, ensure_ascii=False), encoding="utf-8")
+    p = review.CACHE / facts["file_id"] / "report.json"
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rep, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
     return rep
 
 

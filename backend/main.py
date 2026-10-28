@@ -22,6 +22,7 @@ import nidhi
 import review
 import gemini
 import auth
+import revisions
 
 app = FastAPI(title="FDP Reel Reviewer", docs_url=None, redoc_url=None, openapi_url=None)
 app.middleware("http")(auth.middleware)
@@ -150,11 +151,35 @@ def get_reels():
     except Exception as e:
         raise HTTPException(503, f"Could not read the review sheet and no cached copy exists: {e}")
     active = {j.get("file_id"): j for j in jobs.values() if j["kind"] == "review" and j["status"] in ("queued", "running", "waiting")}
+    rev_map = revisions.get_all_revisions(refresh_from_reports=True)
     for r in rows:
         rep = _report(r["file_id"]) if r["file_id"] else None
         r["agent"] = {"verdict": rep["verdict"], "notes": len(rep["notes"]), "created": rep["created"]} if rep else None
         r["job"] = active.get(r["file_id"])
+        key = r["reel"] if r["reel"] and r["reel"] != "-" else r.get("file_id")
+        rev = rev_map.get(key)
+        if rev:
+            r["revision"] = {
+                "round": rev.get("round", 1),
+                "status": rev.get("status", "pending_fixes"),
+                "total": len(rev.get("notes", [])),
+                "editor_done": sum(1 for n in rev.get("notes", []) if n.get("editor_done")),
+                "nidhi_verified": sum(1 for n in rev.get("notes", []) if n.get("nidhi_verified")),
+            }
+        else:
+            r["revision"] = None
     return {"reels": rows}
+
+
+@app.post("/api/sync")
+def sync_data():
+    """Force fresh fetch from Google Sheets and Drive folder, and sync revision items."""
+    try:
+        rows = nidhi.sync_sheet_and_drive()
+        revisions.get_all_revisions(refresh_from_reports=True)
+        return {"ok": True, "count": len(rows), "timestamp": time.time()}
+    except Exception as e:
+        raise HTTPException(502, f"Failed to sync with Google Sheet: {e}")
 
 
 class ReviewRequest(BaseModel):
@@ -278,10 +303,92 @@ def start_backtest():
     return enqueue("backtest")
 
 
-@app.get("/api/backtest")
-def get_backtest():
-    p = review.DATA / "backtest.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"results": []}
+# ---------- notes repository & revisions ----------
+@app.get("/api/revisions")
+def list_revisions():
+    return {"revisions": revisions.get_all_revisions(refresh_from_reports=True)}
+
+
+class ToggleRequest(BaseModel):
+    key: str
+    note_id: str
+    field: str
+    value: bool
+    comment: Optional[str] = None
+
+
+@app.post("/api/revisions/toggle")
+def toggle_revision_note(req: ToggleRequest):
+    try:
+        return revisions.toggle_note_field(req.key, req.note_id, req.field, req.value, req.comment)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+class AdvanceRequest(BaseModel):
+    key: str
+
+
+@app.post("/api/revisions/advance")
+def advance_revision_round(req: AdvanceRequest):
+    try:
+        return revisions.advance_round(req.key)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+class CustomNoteRequest(BaseModel):
+    key: str
+    text: str
+    t: float = 0.0
+    category: str = "custom"
+    severity: str = "medium"
+    author: str = "editor"
+
+
+@app.post("/api/revisions/note")
+def add_revision_note(req: CustomNoteRequest):
+    try:
+        return revisions.add_custom_note(req.key, req.text, req.t, req.category, req.severity, req.author)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/api/revisions/{key}/candidates")
+def get_v2_candidates(key: str):
+    candidates = nidhi.find_v2_candidates(key)
+    rev_data = revisions.get_all_revisions(refresh_from_reports=False)
+    locked = rev_data.get(key, {}).get("v2_video")
+    return {"candidates": candidates, "locked": locked}
+
+
+class ConfirmV2Request(BaseModel):
+    key: str
+    file_id: str
+    name: str = ""
+    url: str = ""
+    start_review: bool = False
+
+
+@app.post("/api/revisions/confirm-v2")
+def confirm_v2(req: ConfirmV2Request):
+    try:
+        updated = revisions.confirm_v2_video(req.key, req.file_id, req.name, req.url)
+        job = None
+        if req.start_review:
+            meta = {"reel": req.key}
+            try:
+                for r in nidhi.reels():
+                    if r["reel"] == req.key:
+                        meta = r
+                        break
+            except Exception:
+                pass
+            target_url = req.url or f"https://drive.google.com/file/d/{req.file_id}/view"
+            job = enqueue("review", url=target_url, reel=req.key, file_id=req.file_id, meta=meta, rerun=True)
+        return {"ok": True, "revision": updated, "job": job}
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 
 # ---------- static frontend (built with `npm run build` -> frontend/out) ----------

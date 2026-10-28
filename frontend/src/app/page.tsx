@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, Icon, Job, Reel, SheetStatus, stageLabel, Verdict } from "./lib";
+import { api, Icon, Job, mss, Reel, Report, SheetStatus, stageLabel, Verdict } from "./lib";
 
 type Filter = "all" | "pending" | "reviewed" | "flagged";
 
@@ -66,6 +66,7 @@ export default function Desk() {
   const [toast, setToast] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3200); };
 
@@ -75,6 +76,31 @@ export default function Desk() {
       setReels(r.reels); setJobs(j.jobs); setErr("");
     } catch (e) { setErr((e as Error).message); }
   }, []);
+
+  const syncSheet = async () => {
+    setSyncing(true);
+    try {
+      const res = await api<{ ok: boolean; count: number }>("/api/sync", { method: "POST" });
+      flash(`Synced ${res.count} reels from Google Sheet & Drive!`);
+      await load();
+    } catch (e) {
+      flash((e as Error).message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const copyRowNotes = async (reelName: string, fid: string | null) => {
+    if (!fid) return;
+    try {
+      const rep = await api<Report>(`/api/report/${fid}`);
+      const text = rep.notes.map((n) => `${mss(n.t)} - ${n.note}`).join("\n");
+      await navigator.clipboard.writeText(text);
+      flash(`Copied ${rep.notes.length} notes for Reel ${reelName}!`);
+    } catch (e) {
+      flash((e as Error).message);
+    }
+  };
 
   const active = jobs.some((j) => j.status === "queued" || j.status === "running");
   useEffect(() => { load(); }, [load]);
@@ -182,12 +208,24 @@ export default function Desk() {
             <div className="h2">Review checklist</div>
             <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>Live from Nidhi&rsquo;s Google Sheet · videos matched from the Drive folder</div>
           </div>
-          <div className="seg" role="tablist">
-            {(["all", "pending", "reviewed", "flagged"] as Filter[]).map((f) => (
-              <button key={f} id={`filter-${f}`} className={filter === f ? "on" : ""} onClick={() => setFilter(f)}>
-                {{ all: "All", pending: "Yet to review", reviewed: "Agent reviewed", flagged: "Flagged" }[f]}
-              </button>
-            ))}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <button
+              id="btn-sync-sheet"
+              className="btn btn-sm"
+              disabled={syncing}
+              onClick={syncSheet}
+              title="Force fresh pull of reels and links from Google Sheet & Drive"
+            >
+              <span className={syncing ? "spin" : ""}><Icon.refresh /></span>
+              {syncing ? "Syncing..." : "Sync Sheet"}
+            </button>
+            <div className="seg" role="tablist">
+              {(["all", "pending", "reviewed", "flagged"] as Filter[]).map((f) => (
+                <button key={f} id={`filter-${f}`} className={filter === f ? "on" : ""} onClick={() => setFilter(f)}>
+                  {{ all: "All", pending: "Yet to review", reviewed: "Agent reviewed", flagged: "Flagged" }[f]}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -196,7 +234,7 @@ export default function Desk() {
         {reels && shown.length === 0 && <div className="empty">Nothing here yet.</div>}
         {reels && shown.length > 0 && (
           <table className="table">
-            <thead><tr><th>Reel</th><th>Editor</th><th>Nidhi</th><th>Her note</th><th>Agent</th><th /></tr></thead>
+            <thead><tr><th>Reel</th><th>Editor</th><th>Nidhi</th><th>Revision Stage</th><th>Agent</th><th /></tr></thead>
             <tbody>
               {shown.map((r) => (
                 <tr key={r.reel}>
@@ -207,7 +245,38 @@ export default function Desk() {
                   </td>
                   <td className="muted">{r.editor}</td>
                   <td><SheetStatus s={r.status} /></td>
-                  <td className="note-cell">{r.notes || <span className="faint">—</span>}</td>
+                  <td>
+                    {r.revision ? (
+                      <Link
+                        href={`/notes-repo?reel=${r.reel}`}
+                        title="Open in Notes & Revision Tracker"
+                      >
+                        <span
+                          className={`chip ${
+                            r.revision.status === "approved"
+                              ? "c-ok"
+                              : r.revision.status === "ready_for_review"
+                              ? "c-info"
+                              : "c-warn"
+                          }`}
+                          style={{ cursor: "pointer" }}
+                        >
+                          <i />
+                          Review {r.revision.round}: {r.revision.nidhi_verified}/{r.revision.total} verified
+                        </span>
+                      </Link>
+                    ) : r.agent ? (
+                      <Link
+                        href={`/notes-repo?reel=${r.reel}`}
+                        className="chip c-info"
+                        title="Open notes checklist"
+                      >
+                        <i /> Review 1
+                      </Link>
+                    ) : (
+                      <span className="faint">—</span>
+                    )}
+                  </td>
                   <td style={{ width: 180 }}>
                     {r.job ? <JobProgress job={r.job} /> : r.agent ? (
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -216,6 +285,16 @@ export default function Desk() {
                     ) : <span className="faint">—</span>}
                   </td>
                   <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                    {r.agent && r.file_id && (
+                      <button
+                        className="btn btn-sm btn-ghost"
+                        style={{ marginRight: 4 }}
+                        onClick={() => copyRowNotes(r.reel, r.file_id)}
+                        title="Quick copy notes"
+                      >
+                        <Icon.copy />
+                      </button>
+                    )}
                     {r.agent && <Link id={`open-${r.reel}`} className="btn btn-sm" href={`/report?id=${r.file_id}`}>Open report</Link>}
                     {r.file_id && !r.job && (
                       <button id={`review-${r.reel}`} className={`btn btn-sm ${r.agent ? "btn-ghost" : ""}`} style={{ marginLeft: 6 }} disabled={busy}

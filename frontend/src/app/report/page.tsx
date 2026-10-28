@@ -71,7 +71,10 @@ function ReportView() {
             {rep.editor && <>Editor {rep.editor} · </>}{rep.media.duration.toFixed(0)}s · {rep.media.width}×{rep.media.height} · {rep.media.fps}fps · {rep.media.cuts.length} cuts
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Link href={`/notes-repo?reel=${rep.reel || rep.file_id}`} className="btn" id="btn-open-checklist">
+            <Icon.checklist /> Revision Checklist
+          </Link>
           <a className="btn" href={rep.url} target="_blank" rel="noreferrer" id="btn-open-drive"><Icon.link /> Open in Drive</a>
           <button className="btn btn-primary" onClick={copy} id="btn-copy-notes" disabled={!rep.notes.length}>
             {copied ? <Icon.check /> : <Icon.copy />} {copied ? "Copied" : "Copy notes for sheet"}
