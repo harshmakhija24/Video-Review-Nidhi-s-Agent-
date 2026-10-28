@@ -19,6 +19,7 @@ venv/
 temp_audio_*.m4a
 temp_*
 
-# Reviewer runtime data (downloaded reels, frames, jobs). The learned rulebook is kept in git.
+# Reviewer runtime data (downloaded reels, frames, jobs). The learned rulebook and revision tracking are kept in git.
 backend/data/*
 !backend/data/rulebook.json
+!backend/data/revisions.json

@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { api, API, BASIS_CLASS, Icon, mss, RevisionItem, RevisionNote, SEV_COLOR } from "../lib";
 
-type Filter = "all" | "pending_editor" | "ready_nidhi" | "round_1" | "round_2" | "approved";
+type Filter = "all" | "pending_editor" | "ready_nidhi" | "round_1" | "round_2" | "approved" | "unreviewed";
 
 function NoteItem({
   reelKey,
@@ -358,11 +358,13 @@ function ReelRevisionCard({
   onToggle,
   onConfirmV2,
   onAddNote,
+  onStartReview,
 }: {
   item: RevisionItem;
   onToggle: (key: string, noteId: string, field: "editor_done" | "nidhi_verified", val: boolean) => Promise<void>;
   onConfirmV2: (key: string, data: { file_id: string; name: string; url: string; start_review: boolean }) => Promise<void>;
   onAddNote: (key: string, text: string) => Promise<void>;
+  onStartReview?: (key: string, url?: string) => Promise<void>;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [showHistory, setShowHistory] = useState(false);
@@ -370,12 +372,24 @@ function ReelRevisionCard({
   const [customText, setCustomText] = useState("");
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [v2ModalOpen, setV2ModalOpen] = useState(false);
+  const [startingReview, setStartingReview] = useState(false);
 
   const total = item.notes.length;
   const editorDoneCount = item.notes.filter((n) => n.editor_done).length;
   const nidhiVerifiedCount = item.notes.filter((n) => n.nidhi_verified).length;
-  const isAllVerified = total > 0 && nidhiVerifiedCount === total;
-  const isReadyForNidhi = total > 0 && editorDoneCount === total && !isAllVerified;
+  const isApproved = (total > 0 && nidhiVerifiedCount === total) || item.status === "approved";
+  const isReadyForNidhi = total > 0 && editorDoneCount === total && !isApproved;
+  const isUnreviewed = (total === 0 && item.status !== "approved") || item.status === "unreviewed";
+
+  const handleTriggerReview = async () => {
+    if (!onStartReview) return;
+    setStartingReview(true);
+    try {
+      await onStartReview(item.reel, item.url);
+    } finally {
+      setStartingReview(false);
+    }
+  };
 
   const copyNotes = async (onlyPending = false) => {
     const list = onlyPending ? item.notes.filter((n) => !n.nidhi_verified) : item.notes;
@@ -425,13 +439,17 @@ function ReelRevisionCard({
               >
                 Review {item.round}
               </span>
-              {isAllVerified ? (
+              {isApproved ? (
                 <span className="chip c-ok text-xs">
-                  <i /> Approved & Verified
+                  <i /> Approved &amp; Verified
                 </span>
               ) : isReadyForNidhi ? (
                 <span className="chip c-info text-xs">
                   <i /> Ready for Nidhi Verification
+                </span>
+              ) : isUnreviewed ? (
+                <span className="chip c-warn text-xs">
+                  <i /> Unreviewed / Waiting
                 </span>
               ) : (
                 <span className="chip c-warn text-xs">
@@ -441,7 +459,11 @@ function ReelRevisionCard({
             </div>
             <div className="text-xs text-white/40 mt-1">
               {item.editor && `Editor: ${item.editor} · `}
-              {total} items · {nidhiVerifiedCount} verified by Nidhi · {editorDoneCount} fixed by Editor
+              {total > 0
+                ? `${total} items · ${nidhiVerifiedCount} verified by Nidhi · ${editorDoneCount} fixed by Editor`
+                : isUnreviewed
+                ? "No review report yet"
+                : "No issues flagged"}
             </div>
             {item.v2_video?.confirmed && (
               <div style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 4, padding: "2px 8px", borderRadius: 8, background: "rgba(182, 156, 255, 0.1)", border: "1px solid rgba(182, 156, 255, 0.25)", fontSize: 11, color: "var(--accent)" }}>
@@ -460,22 +482,35 @@ function ReelRevisionCard({
 
         {/* Header Actions */}
         <div className="flex items-center gap-2.5 flex-wrap">
+          {isUnreviewed && (item.url || item.file_id) && (
+            <button
+              onClick={handleTriggerReview}
+              disabled={startingReview}
+              className="btn btn-sm btn-primary text-xs"
+              title="Launch AI Review now"
+            >
+              {startingReview ? <span className="spin" /> : "▶"} {startingReview ? "Queuing..." : "Start Review"}
+            </button>
+          )}
+
           {item.file_id && (
             <Link
               href={`/report?id=${item.file_id}`}
               className="btn btn-sm btn-ghost hover:bg-white/5 text-xs text-white/80"
             >
-              <Icon.play /> Watch & Report
+              <Icon.play /> Watch &amp; Report
             </Link>
           )}
 
-          <button
-            onClick={() => copyNotes(false)}
-            className="btn btn-sm text-xs"
-            title="Copy all notes for this reel"
-          >
-            {copied ? <Icon.check /> : <Icon.copy />} {copied ? "Copied" : "Copy Notes"}
-          </button>
+          {total > 0 && (
+            <button
+              onClick={() => copyNotes(false)}
+              className="btn btn-sm text-xs"
+              title="Copy all notes for this reel"
+            >
+              {copied ? <Icon.check /> : <Icon.copy />} {copied ? "Copied" : "Copy Notes"}
+            </button>
+          )}
 
           <button
             onClick={() => setV2ModalOpen(true)}
@@ -504,7 +539,24 @@ function ReelRevisionCard({
         <div className="p-5">
           {item.notes.length === 0 ? (
             <div className="py-8 text-center text-sm text-white/40">
-              No notes recorded for this reel. It is approved!
+              {isUnreviewed ? (
+                <div style={{ display: "grid", gap: 10, placeItems: "center" }}>
+                  <div>This reel has not been reviewed by the AI agent yet.</div>
+                  {(item.url || item.file_id) ? (
+                    <button
+                      onClick={handleTriggerReview}
+                      disabled={startingReview}
+                      className="btn btn-sm btn-primary"
+                    >
+                      {startingReview ? <span className="spin" /> : "▶"} {startingReview ? "Queuing Review..." : "Run AI Review Now"}
+                    </button>
+                  ) : (
+                    <span className="faint text-xs">No video link attached in Google Sheet yet.</span>
+                  )}
+                </div>
+              ) : (
+                <div>No notes recorded for this reel. It is approved!</div>
+              )}
             </div>
           ) : (
             <div>
@@ -689,6 +741,39 @@ function NotesRepoContent() {
     }
   };
 
+  const handleStartReview = async (reelKey: string, url?: string) => {
+    try {
+      flash(`Starting AI review for Reel ${reelKey}...`);
+      await api("/api/review", {
+        method: "POST",
+        body: JSON.stringify({
+          urls: url ? [url] : [],
+          reels: [reelKey],
+          rerun: true,
+        }),
+      });
+      flash(`AI Review queued for Reel ${reelKey}!`);
+      load();
+    } catch (e) {
+      flash((e as Error).message);
+    }
+  };
+
+  const [syncing, setSyncing] = useState(false);
+  const handleSyncSheet = async () => {
+    setSyncing(true);
+    try {
+      flash("Syncing Google Sheet & Drive files...");
+      await api("/api/sync", { method: "POST" });
+      await load();
+      flash("Successfully synced sheet & Drive!");
+    } catch (e) {
+      flash((e as Error).message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const itemsList = useMemo(() => Object.values(revisions), [revisions]);
 
   const stats = useMemo(() => {
@@ -697,6 +782,7 @@ function NotesRepoContent() {
     let pendingEditor = 0;
     let readyNidhi = 0;
     let approved = 0;
+    let unreviewed = 0;
 
     for (const item of itemsList) {
       if (item.round === 1) round1++;
@@ -705,17 +791,23 @@ function NotesRepoContent() {
       const total = item.notes.length;
       const editorCount = item.notes.filter((n) => n.editor_done).length;
       const nidhiCount = item.notes.filter((n) => n.nidhi_verified).length;
+      const isApproved = (total > 0 && nidhiCount === total) || item.status === "approved";
+      const isReadyNidhi = total > 0 && editorCount === total && !isApproved;
+      const isPendingEditor = total > 0 && editorCount < total;
+      const isUnreviewed = (total === 0 && item.status !== "approved") || item.status === "unreviewed";
 
-      if (total > 0 && nidhiCount === total) {
+      if (isApproved) {
         approved++;
-      } else if (total > 0 && editorCount === total) {
+      } else if (isReadyNidhi) {
         readyNidhi++;
-      } else if (total > 0) {
+      } else if (isPendingEditor) {
         pendingEditor++;
+      } else if (isUnreviewed) {
+        unreviewed++;
       }
     }
 
-    return { total: itemsList.length, round1, round2, pendingEditor, readyNidhi, approved };
+    return { total: itemsList.length, round1, round2, pendingEditor, readyNidhi, approved, unreviewed };
   }, [itemsList]);
 
   const filteredItems = useMemo(() => {
@@ -724,15 +816,17 @@ function NotesRepoContent() {
       const total = item.notes.length;
       const editorCount = item.notes.filter((n) => n.editor_done).length;
       const nidhiCount = item.notes.filter((n) => n.nidhi_verified).length;
-      const isApproved = total > 0 && nidhiCount === total;
+      const isApproved = (total > 0 && nidhiCount === total) || item.status === "approved";
       const isReadyNidhi = total > 0 && editorCount === total && !isApproved;
       const isPendingEditor = total > 0 && editorCount < total;
+      const isUnreviewed = (total === 0 && item.status !== "approved") || item.status === "unreviewed";
 
       if (filter === "round_1" && item.round !== 1) return false;
       if (filter === "round_2" && item.round <= 1) return false;
       if (filter === "pending_editor" && !isPendingEditor) return false;
       if (filter === "ready_nidhi" && !isReadyNidhi) return false;
       if (filter === "approved" && !isApproved) return false;
+      if (filter === "unreviewed" && !isUnreviewed) return false;
 
       // Text query
       if (query.trim()) {
@@ -778,7 +872,7 @@ function NotesRepoContent() {
 
       {/* Header */}
       <header className="mb-8">
-        <div className="eyebrow">Revision Tracker & Notes Repository</div>
+        <div className="eyebrow">Revision Tracker &amp; Notes Repository</div>
         <h1 className="h1">
           Review 1 &amp; Review 2 <em>Notes Desk</em>
         </h1>
@@ -791,7 +885,7 @@ function NotesRepoContent() {
       {/* Stats Cards */}
       <div className="grid-stats">
         <div className="panel stat">
-          <div className="eyebrow">Active Reels</div>
+          <div className="eyebrow">All Reels</div>
           <div className="stat-n">{stats.total}</div>
           <div className="stat-bar" style={{ background: "var(--accent)" }} />
         </div>
@@ -814,7 +908,7 @@ function NotesRepoContent() {
 
       {/* Filter and Search Bar */}
       <div className="panel panel-pad mb-6 flex items-center justify-between gap-4 flex-wrap">
-        <div className="seg">
+        <div className="seg flex-wrap">
           <button className={filter === "all" ? "on" : ""} onClick={() => setFilter("all")}>
             All ({itemsList.length})
           </button>
@@ -831,13 +925,16 @@ function NotesRepoContent() {
             Needs Nidhi ({stats.readyNidhi})
           </button>
           <button className={filter === "round_1" ? "on" : ""} onClick={() => setFilter("round_1")}>
-            Review 1
+            Review 1 ({stats.round1})
           </button>
           <button className={filter === "round_2" ? "on" : ""} onClick={() => setFilter("round_2")}>
             Review 2 ({stats.round2})
           </button>
           <button className={filter === "approved" ? "on" : ""} onClick={() => setFilter("approved")}>
             Approved ({stats.approved})
+          </button>
+          <button className={filter === "unreviewed" ? "on" : ""} onClick={() => setFilter("unreviewed")}>
+            Unreviewed ({stats.unreviewed})
           </button>
         </div>
 
@@ -847,8 +944,17 @@ function NotesRepoContent() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search reel, editor, or note..."
-            className="bg-black/30 border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white min-w-[220px] focus:outline-none focus:border-purple-400"
+            className="bg-black/30 border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white min-w-[200px] focus:outline-none focus:border-purple-400"
           />
+          <button
+            onClick={handleSyncSheet}
+            disabled={syncing}
+            className="btn btn-sm btn-ghost"
+            style={{ border: "1px solid var(--line)" }}
+            title="Sync latest rows from Google Sheets & Drive"
+          >
+            {syncing ? <span className="spin" /> : "🔄"} {syncing ? "Syncing..." : "Sync Sheet"}
+          </button>
           <button onClick={copyAllUnresolved} className="btn btn-sm btn-primary">
             {copiedAll ? <Icon.check /> : <Icon.copy />} {copiedAll ? "Copied" : "Copy Pending Fixes"}
           </button>
@@ -874,6 +980,7 @@ function NotesRepoContent() {
               onToggle={handleToggle}
               onConfirmV2={handleConfirmV2}
               onAddNote={handleAddNote}
+              onStartReview={handleStartReview}
             />
           ))}
         </div>

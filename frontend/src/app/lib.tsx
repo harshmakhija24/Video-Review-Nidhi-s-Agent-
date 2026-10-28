@@ -54,7 +54,7 @@ export type RevisionItem = {
   file_id: string;
   editor: string;
   round: number;
-  status: "pending_fixes" | "ready_for_review" | "approved";
+  status: "pending_fixes" | "ready_for_review" | "approved" | "unreviewed";
   notes: RevisionNote[];
   history?: RevisionRound[];
   url?: string;
@@ -75,7 +75,7 @@ export type Reel = {
   agent: { verdict: string; notes: number; created: string } | null; job: Job | null;
   revision?: {
     round: number;
-    status: "pending_fixes" | "ready_for_review" | "approved";
+    status: "pending_fixes" | "ready_for_review" | "approved" | "unreviewed";
     total: number;
     editor_done: number;
     nidhi_verified: number;

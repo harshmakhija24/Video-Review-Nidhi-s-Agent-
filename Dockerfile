@@ -17,9 +17,9 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 RUN python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8')"
 COPY backend/ backend/
 COPY --from=web /web/out frontend/out
-# A persistent disk mounted at backend/data hides files shipped in the image, so keep a seed copy of the rulebook
-RUN mkdir -p seed backend/data && cp backend/data/rulebook.json seed/ 2>/dev/null || true
+# A persistent disk mounted at backend/data hides files shipped in the image, so keep a seed copy of rulebook and revisions
+RUN mkdir -p seed backend/data && cp backend/data/rulebook.json backend/data/revisions.json seed/ 2>/dev/null || true
 
 ENV HOST=0.0.0.0 PYTHONUNBUFFERED=1
 EXPOSE 8000
-CMD ["sh", "-c", "mkdir -p backend/data && cp -n seed/rulebook.json backend/data/ 2>/dev/null; python backend/main.py"]
+CMD ["sh", "-c", "mkdir -p backend/data && cp -n seed/rulebook.json backend/data/ 2>/dev/null; cp -n seed/revisions.json backend/data/ 2>/dev/null; python backend/main.py"]

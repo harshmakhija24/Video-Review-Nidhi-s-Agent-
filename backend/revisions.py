@@ -37,9 +37,11 @@ def _save_raw(data: dict):
             time.sleep(0.05)
 
 
-def _compute_status(notes: list, round_num: int) -> str:
-    """Computes status: pending_fixes, ready_for_review, or approved."""
+def _compute_status(notes: list, round_num: int, current_status: str = "") -> str:
+    """Computes status: pending_fixes, ready_for_review, approved, or unreviewed."""
     if not notes:
+        if current_status == "unreviewed":
+            return "unreviewed"
         return "approved"
     all_nidhi = all(n.get("nidhi_verified") for n in notes)
     if all_nidhi:
@@ -51,7 +53,7 @@ def _compute_status(notes: list, round_num: int) -> str:
 
 
 def get_all_revisions(refresh_from_reports: bool = True) -> Dict[str, Any]:
-    """Returns all tracked reel revisions, populating any newly finished AI reports."""
+    """Returns all tracked reel revisions, populating any newly finished AI reports and sheet reels."""
     data = _load_raw()
     updated = False
 
@@ -111,6 +113,72 @@ def get_all_revisions(refresh_from_reports: bool = True) -> Dict[str, Any]:
                 if not entry.get("editor") and rep.get("editor"):
                     entry["editor"] = rep.get("editor")
                     updated = True
+                if not entry.get("notes") and rep.get("notes"):
+                    notes = []
+                    for i, n in enumerate(rep.get("notes", [])):
+                        notes.append({
+                            "id": f"n_{i}_{int(n.get('t', 0))}",
+                            "t": n.get("t", 0),
+                            "end": n.get("end", n.get("t", 0)),
+                            "note": n.get("note", ""),
+                            "category": n.get("category", "general"),
+                            "severity": n.get("severity", "medium"),
+                            "basis": n.get("basis", "observed"),
+                            "rule": n.get("rule", ""),
+                            "editor_done": False,
+                            "editor_comment": "",
+                            "nidhi_verified": False,
+                            "nidhi_comment": "",
+                        })
+                    entry["notes"] = notes
+                    entry["status"] = _compute_status(notes, entry.get("round", 1))
+                    updated = True
+
+    # Ensure all reels from Google Sheet are represented
+    if refresh_from_reports:
+        try:
+            sheet_reels = nidhi.reels()
+            for r in sheet_reels:
+                key = r.get("reel")
+                if not key:
+                    continue
+                fid = r.get("file_id") or ""
+                link = r.get("link") or ""
+                editor = r.get("editor") or ""
+                sheet_st = (r.get("status") or "").strip().lower()
+
+                if key not in data:
+                    init_st = "approved" if "approved" in sheet_st else "unreviewed"
+                    data[key] = {
+                        "reel": key,
+                        "file_id": fid,
+                        "editor": editor,
+                        "round": 1,
+                        "status": init_st,
+                        "notes": [],
+                        "history": [],
+                        "url": link,
+                        "sheet_status": r.get("status") or "",
+                        "created_at": time.strftime("%Y-%m-%d %H:%M"),
+                        "updated_at": time.time(),
+                    }
+                    updated = True
+                else:
+                    entry = data[key]
+                    if not entry.get("file_id") and fid:
+                        entry["file_id"] = fid
+                        updated = True
+                    if not entry.get("editor") and editor:
+                        entry["editor"] = editor
+                        updated = True
+                    if not entry.get("url") and link:
+                        entry["url"] = link
+                        updated = True
+                    if not entry.get("sheet_status") and r.get("status"):
+                        entry["sheet_status"] = r.get("status")
+                        updated = True
+        except Exception:
+            pass
 
     if updated:
         _save_raw(data)
