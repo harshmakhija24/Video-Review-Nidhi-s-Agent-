@@ -171,8 +171,11 @@ def sync_sheet_and_drive() -> list[dict]:
 # ---------- rulebook ----------
 def load_rulebook() -> dict:
     rb = json.loads(RULEBOOK.read_text(encoding="utf-8")) if RULEBOOK.exists() else {"rules": [], "updated": None}
+    seed_p = Path(__file__).parent.parent / "seed" / "rulebook.json"
+    seed_rules = json.loads(seed_p.read_text(encoding="utf-8")).get("rules", []) if seed_p.exists() else []
+    defaults = [{**r, "basis": "observed", "status": "active", "confidence": 1.0} for r in SEED_RULES] + seed_rules
     have = {r["id"] for r in rb["rules"]}
-    rb["rules"] = [{**r, "basis": "observed", "status": "active", "confidence": 1.0} for r in SEED_RULES if r["id"] not in have] + rb["rules"]
+    rb["rules"] = [r for r in defaults if r["id"] not in have] + rb["rules"]
     return rb
 
 
