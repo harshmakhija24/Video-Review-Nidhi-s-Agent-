@@ -92,6 +92,7 @@ def worker():
         try:
             if job["kind"] == "review":
                 rep = nidhi.run(job["url"], job.get("meta"), prog)
+                revisions.sync_report_to_revision(rep)
                 update(jid, status="done", stage="done", pct=1, verdict=rep["verdict"], notes=len(rep["notes"]),
                        reel=rep.get("reel") or job.get("reel"), writer=rep["writer"], partial=rep["partial"])
                 if rep["partial"] and job.get("resumes", 0) < MAX_RESUMES:
@@ -391,7 +392,11 @@ def confirm_v2(req: ConfirmV2Request):
             except Exception:
                 pass
             target_url = req.url or f"https://drive.google.com/file/d/{req.file_id}/view"
-            job = enqueue("review", url=target_url, reel=req.key, file_id=req.file_id, meta=meta, rerun=True)
+            _safe_url(target_url)
+            fid = review.file_id(target_url)
+            if (review.CACHE / fid / "report.json").exists():
+                (review.CACHE / fid / "report.json").unlink()
+            job = enqueue("review", url=target_url, reel=req.key, file_id=fid, meta=meta)
         return {"ok": True, "revision": updated, "job": job}
     except Exception as e:
         raise HTTPException(400, str(e))

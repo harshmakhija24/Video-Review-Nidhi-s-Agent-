@@ -189,7 +189,8 @@ function ConfirmV2Modal({
     try {
       if (isCustom) {
         if (!customUrl.trim()) return;
-        const fid = customUrl.match(/\/d\/([\w-]{20,})|[?&]id=([\w-]{20,})/)?.[1] || customUrl.trim();
+        const m = customUrl.match(/\/d\/([\w-]{20,})|[?&]id=([\w-]{20,})/);
+        const fid = m?.[1] || m?.[2] || customUrl.trim();
         await onConfirmed({
           file_id: fid,
           name: `${reel}_v2.mp4`,

@@ -115,7 +115,8 @@ export default function Desk() {
       const r = await api<{ queued: Job[] }>("/api/review", { method: "POST", body: JSON.stringify(body) });
       flash(r.queued.length ? `${msg} - ${r.queued.length} queued` : "Already in the queue");
       load();
-    } catch (e) { flash((e as Error).message); } finally { setBusy(false); }
+      return true;
+    } catch (e) { flash((e as Error).message); return false; } finally { setBusy(false); }
   };
 
   const stats = useMemo(() => {
@@ -179,7 +180,7 @@ export default function Desk() {
           placeholder={"https://drive.google.com/file/d/…/view\nhttps://drive.google.com/file/d/…/view"} />
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <button id="btn-review-links" className="btn btn-primary" disabled={busy || !links.trim()}
-            onClick={() => { queue({ urls: [links] }, "Review started"); setLinks(""); }}>
+            onClick={async () => { if (await queue({ urls: [links] }, "Review started")) setLinks(""); }}>
             {busy ? <span className="spin" /> : <Icon.play />} Review {links.trim() ? links.trim().split(/[\s,]+/).filter(Boolean).length : ""} reel{links.trim().split(/[\s,]+/).filter(Boolean).length === 1 ? "" : "s"}
           </button>
         </div>

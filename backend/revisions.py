@@ -52,89 +52,68 @@ def _compute_status(notes: list, round_num: int, current_status: str = "") -> st
     return "pending_fixes"
 
 
+def _notes_from_report(rep: dict) -> list:
+    return [{
+        "id": f"n_{i}_{int(n.get('t', 0))}",
+        "t": n.get("t", 0),
+        "end": n.get("end", n.get("t", 0)),
+        "note": n.get("note", ""),
+        "category": n.get("category", "general"),
+        "severity": n.get("severity", "medium"),
+        "basis": n.get("basis", "observed"),
+        "rule": n.get("rule", ""),
+        "editor_done": False,
+        "editor_comment": "",
+        "nidhi_verified": False,
+        "nidhi_comment": "",
+    } for i, n in enumerate(rep.get("notes", []))]
+
+
+def sync_report_to_revision(rep: dict):
+    """Syncs a newly completed AI review report directly into revisions.json."""
+    fid = rep.get("file_id") or ""
+    reel_name = rep.get("reel") or fid[:8]
+    key = reel_name if reel_name and reel_name != "-" else fid
+    if not key:
+        return
+    data = _load_raw()
+    new_notes = _notes_from_report(rep)
+    if key not in data:
+        data[key] = {
+            "reel": reel_name,
+            "file_id": fid,
+            "report_file_id": fid,
+            "editor": rep.get("editor") or "",
+            "round": 1,
+            "status": _compute_status(new_notes, 1),
+            "notes": new_notes,
+            "history": [],
+            "url": rep.get("url") or "",
+            "created_at": rep.get("created") or time.strftime("%Y-%m-%d %H:%M"),
+            "updated_at": time.time(),
+        }
+    else:
+        entry = data[key]
+        if fid:
+            entry["file_id"] = fid
+            entry["report_file_id"] = fid
+        if rep.get("editor") and not entry.get("editor"):
+            entry["editor"] = rep.get("editor")
+        if rep.get("url"):
+            entry["url"] = rep.get("url")
+        manual_notes = [n for n in entry.get("notes", []) if n.get("basis") == "manual"]
+        entry["notes"] = manual_notes + new_notes
+        entry["status"] = _compute_status(entry["notes"], entry.get("round", 1))
+        entry["updated_at"] = time.time()
+    _save_raw(data)
+
+
 def get_all_revisions(refresh_from_reports: bool = True) -> Dict[str, Any]:
     """Returns all tracked reel revisions, populating any newly finished AI reports and sheet reels."""
     data = _load_raw()
     updated = False
 
-    if refresh_from_reports and CACHE.exists():
-        for d in CACHE.iterdir():
-            if not d.is_dir():
-                continue
-            rep_file = d / "report.json"
-            if not rep_file.exists():
-                continue
-            try:
-                rep = json.loads(rep_file.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-
-            fid = rep.get("file_id") or d.name
-            reel_name = rep.get("reel") or fid[:8]
-            key = reel_name if reel_name and reel_name != "-" else fid
-
-            if key not in data:
-                # Initialize new revision entry from report notes
-                notes = []
-                for i, n in enumerate(rep.get("notes", [])):
-                    notes.append({
-                        "id": f"n_{i}_{int(n.get('t', 0))}",
-                        "t": n.get("t", 0),
-                        "end": n.get("end", n.get("t", 0)),
-                        "note": n.get("note", ""),
-                        "category": n.get("category", "general"),
-                        "severity": n.get("severity", "medium"),
-                        "basis": n.get("basis", "observed"),
-                        "rule": n.get("rule", ""),
-                        "editor_done": False,
-                        "editor_comment": "",
-                        "nidhi_verified": False,
-                        "nidhi_comment": "",
-                    })
-                data[key] = {
-                    "reel": reel_name,
-                    "file_id": fid,
-                    "editor": rep.get("editor") or "",
-                    "round": 1,
-                    "status": _compute_status(notes, 1),
-                    "notes": notes,
-                    "history": [],
-                    "url": rep.get("url") or "",
-                    "created_at": rep.get("created") or time.strftime("%Y-%m-%d %H:%M"),
-                    "updated_at": time.time(),
-                }
-                updated = True
-            else:
-                # Update metadata if missing
-                entry = data[key]
-                if not entry.get("file_id"):
-                    entry["file_id"] = fid
-                    updated = True
-                if not entry.get("editor") and rep.get("editor"):
-                    entry["editor"] = rep.get("editor")
-                    updated = True
-                if not entry.get("notes") and rep.get("notes"):
-                    notes = []
-                    for i, n in enumerate(rep.get("notes", [])):
-                        notes.append({
-                            "id": f"n_{i}_{int(n.get('t', 0))}",
-                            "t": n.get("t", 0),
-                            "end": n.get("end", n.get("t", 0)),
-                            "note": n.get("note", ""),
-                            "category": n.get("category", "general"),
-                            "severity": n.get("severity", "medium"),
-                            "basis": n.get("basis", "observed"),
-                            "rule": n.get("rule", ""),
-                            "editor_done": False,
-                            "editor_comment": "",
-                            "nidhi_verified": False,
-                            "nidhi_comment": "",
-                        })
-                    entry["notes"] = notes
-                    entry["status"] = _compute_status(notes, entry.get("round", 1))
-                    updated = True
-
-    # Ensure all reels from Google Sheet are represented
+    # 1. Ensure all reels from Google Sheet are represented first
     if refresh_from_reports:
         try:
             sheet_reels = nidhi.reels()
@@ -180,6 +159,58 @@ def get_all_revisions(refresh_from_reports: bool = True) -> Dict[str, Any]:
         except Exception:
             pass
 
+    # 2. Sync each tracked reel against its current file_id's report.json
+    if refresh_from_reports and CACHE.exists():
+        for key, entry in list(data.items()):
+            fid = entry.get("file_id")
+            if not fid:
+                continue
+            rep_file = CACHE / fid / "report.json"
+            if not rep_file.exists():
+                continue
+            try:
+                rep = json.loads(rep_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if entry.get("status") == "unreviewed" or (not entry.get("notes") and entry.get("report_file_id") != fid):
+                notes = _notes_from_report(rep)
+                entry["notes"] = notes
+                entry["report_file_id"] = fid
+                entry["status"] = _compute_status(notes, entry.get("round", 1))
+                updated = True
+
+        # 3. Also include any ad-hoc reports in CACHE not in the sheet
+        known_fids = {e.get("file_id") for e in data.values() if e.get("file_id")}
+        for d in CACHE.iterdir():
+            if not d.is_dir() or d.name in known_fids:
+                continue
+            rep_file = d / "report.json"
+            if not rep_file.exists():
+                continue
+            try:
+                rep = json.loads(rep_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            fid = rep.get("file_id") or d.name
+            reel_name = rep.get("reel") or fid[:8]
+            key = reel_name if reel_name and reel_name != "-" else fid
+            if key not in data:
+                notes = _notes_from_report(rep)
+                data[key] = {
+                    "reel": reel_name,
+                    "file_id": fid,
+                    "report_file_id": fid,
+                    "editor": rep.get("editor") or "",
+                    "round": 1,
+                    "status": _compute_status(notes, 1),
+                    "notes": notes,
+                    "history": [],
+                    "url": rep.get("url") or "",
+                    "created_at": rep.get("created") or time.strftime("%Y-%m-%d %H:%M"),
+                    "updated_at": time.time(),
+                }
+                updated = True
+
     if updated:
         _save_raw(data)
 
@@ -219,22 +250,20 @@ def advance_round(key: str) -> dict:
     entry = data[key]
     current_round = entry.get("round", 1)
 
-    # Archive current round
+    # Archive current round (copy note dicts so Round 2 resets don't mutate history)
     history_item = {
         "round": current_round,
         "completed_at": time.strftime("%Y-%m-%d %H:%M"),
-        "notes": entry["notes"],
+        "notes": [dict(n) for n in entry["notes"]],
         "total": len(entry["notes"]),
         "editor_done": sum(1 for n in entry["notes"] if n.get("editor_done")),
         "nidhi_verified": sum(1 for n in entry["notes"] if n.get("nidhi_verified")),
     }
     entry.setdefault("history", []).append(history_item)
 
-    # Prepare Round 2: Keep unverified notes or start fresh for review 2
-    unverified = [n for n in entry["notes"] if not n.get("nidhi_verified")]
-    for n in unverified:
-        n["editor_done"] = False  # requires new pass in review 2
-        n["nidhi_verified"] = False
+    # Prepare Round 2: Keep unverified notes as fresh copies for review 2
+    unverified = [{**n, "editor_done": False, "nidhi_verified": False}
+                  for n in entry["notes"] if not n.get("nidhi_verified")]
 
     entry["round"] = current_round + 1
     entry["notes"] = unverified
