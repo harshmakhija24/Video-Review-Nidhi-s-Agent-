@@ -1,10 +1,88 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { API } from "./lib";
 
 const post = (path: string, body: object) =>
   fetch(`${API}${path}`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+const AuthCtx = createContext<{ email: string; signOut: () => void }>({ email: "", signOut: () => {} });
+
+export function UserStatus() {
+  const { email, signOut } = useContext(AuthCtx);
+  const displayEmail = email && email !== "local" ? email : "Active session";
+  return (
+    <div
+      style={{
+        marginBottom: 12,
+        padding: "12px",
+        borderRadius: 14,
+        background: "rgba(255, 255, 255, 0.04)",
+        border: "1px solid var(--line-2)",
+        display: "grid",
+        gap: 10,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8, overflow: "hidden" }}>
+        <div
+          style={{
+            width: 26,
+            height: 26,
+            borderRadius: 8,
+            background: "rgba(182, 156, 255, 0.18)",
+            color: "var(--accent)",
+            display: "grid",
+            placeItems: "center",
+            fontWeight: 700,
+            fontSize: 12,
+            flexShrink: 0,
+          }}
+        >
+          {displayEmail[0]?.toUpperCase()}
+        </div>
+        <div style={{ overflow: "hidden" }}>
+          <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 600 }}>
+            Signed in as
+          </div>
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--text)",
+              fontWeight: 500,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+            title={displayEmail}
+          >
+            {displayEmail}
+          </div>
+        </div>
+      </div>
+      <button
+        id="signout"
+        type="button"
+        onClick={signOut}
+        className="btn btn-sm"
+        style={{
+          width: "100%",
+          justifyContent: "center",
+          background: "rgba(255, 107, 129, 0.14)",
+          borderColor: "rgba(255, 107, 129, 0.4)",
+          color: "#ff8fa3",
+          fontWeight: 600,
+        }}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ width: 14, height: 14 }}>
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+          <polyline points="16 17 21 12 16 7" />
+          <line x1="21" y1="12" x2="9" y2="12" />
+        </svg>
+        Sign out
+      </button>
+    </div>
+  );
+}
 
 /** Blocks the app until the user signs in with an emailed one-time code (allow-listed emails only). */
 export default function AuthGate({ children }: { children: React.ReactNode }) {
@@ -34,7 +112,8 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     if (mode === "password") {
       const r = await post("/auth/login", { email, password: pw });
       setBusy(false);
-      if (r.ok) setState("in"); else setErr((await r.json().catch(() => ({}))).detail ?? "Sign-in failed.");
+      if (r.ok) { setEmail(email.trim().toLowerCase()); setState("in"); }
+      else setErr((await r.json().catch(() => ({}))).detail ?? "Sign-in failed.");
       return;
     }
     const r = await post("/auth/request", { email });
@@ -46,7 +125,15 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     e.preventDefault(); setBusy(true); setErr("");
     const r = await post("/auth/verify", { email, code });
     setBusy(false);
-    if (r.ok) setState("in"); else setErr((await r.json().catch(() => ({}))).detail ?? "Sign-in failed.");
+    if (r.ok) { setEmail(email.trim().toLowerCase()); setState("in"); }
+    else setErr((await r.json().catch(() => ({}))).detail ?? "Sign-in failed.");
+  }
+
+  async function signOut() {
+    await fetch(`${API}/auth/logout`, { method: "POST", credentials: "include" }).catch(() => {});
+    setPw("");
+    setCode("");
+    setState("email");
   }
 
   if (state === "loading") return null;
@@ -78,24 +165,5 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
-  return (
-    <>
-      {children}
-      {email && email !== "local" && (
-        <button
-          id="signout"
-          className="faint"
-          style={{ position: "fixed", bottom: 12, right: 16, zIndex: 100, background: "none", border: 0, cursor: "pointer" }}
-          onClick={async () => {
-            await fetch(`${API}/auth/logout`, { method: "POST", credentials: "include" }).catch(() => {});
-            setPw("");
-            setCode("");
-            setState("email");
-          }}
-        >
-          {email} · Sign out
-        </button>
-      )}
-    </>
-  );
+  return <AuthCtx.Provider value={{ email, signOut }}>{children}</AuthCtx.Provider>;
 }

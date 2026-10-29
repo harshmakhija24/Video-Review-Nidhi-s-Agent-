@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Instrument_Serif } from "next/font/google";
 import Nav from "./nav";
-import AuthGate from "./auth-gate";
+import AuthGate, { UserStatus } from "./auth-gate";
 import "./globals.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
@@ -28,9 +28,12 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
               </div>
             </div>
             <Nav />
-            <div className="sidebar-foot">
-              <span className="dot-live" />Groq free tier
-              <div className="faint" style={{ marginTop: 4 }}>Vision: qwen3.8-27b · Notes: gpt-oss-120b · Speech: whisper-v3</div>
+            <div style={{ marginTop: "auto" }}>
+              <UserStatus />
+              <div className="sidebar-foot" style={{ marginTop: 0 }}>
+                <span className="dot-live" />Groq free tier
+                <div className="faint" style={{ marginTop: 4 }}>Vision: qwen3.8-27b · Notes: gpt-oss-120b · Speech: whisper-v3</div>
+              </div>
             </div>
           </aside>
           <main className="main">{children}</main>
