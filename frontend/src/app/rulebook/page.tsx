@@ -20,8 +20,8 @@ export default function Rulebook() {
   const load = useCallback(async () => {
     const [rb, b, j] = await Promise.all([
       api<{ rules: Rule[]; updated: string | null }>("/api/rulebook"),
-      api<Backtest>("/api/backtest"),
-      api<{ jobs: Job[] }>("/api/jobs"),
+      api<Backtest>("/api/backtest").catch(() => ({ results: [] } as Backtest)),
+      api<{ jobs: Job[] }>("/api/jobs").catch(() => ({ jobs: [] })),
     ]);
     setRules(rb.rules); setUpdated(rb.updated); setBt(b); setJobs(j.jobs);
   }, []);

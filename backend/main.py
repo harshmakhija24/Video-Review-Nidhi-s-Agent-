@@ -303,6 +303,12 @@ def start_backtest():
     return enqueue("backtest")
 
 
+@app.get("/api/backtest")
+def get_backtest():
+    p = review.DATA / "backtest.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {"results": []}
+
+
 # ---------- notes repository & revisions ----------
 @app.get("/api/revisions")
 def list_revisions():

@@ -222,6 +222,7 @@ def verify_code(body: CodeVerify, request: Request, response: Response):
 
 
 @router.post("/auth/logout")
-def logout(response: Response):
-    response.delete_cookie(COOKIE, path="/")
+def logout(request: Request, response: Response):
+    secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+    response.delete_cookie(COOKIE, path="/", httponly=True, secure=secure, samesite="lax")
     return {"ok": True}

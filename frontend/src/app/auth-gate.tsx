@@ -85,8 +85,13 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
         <button
           id="signout"
           className="faint"
-          style={{ position: "fixed", bottom: 12, right: 16, background: "none", border: 0, cursor: "pointer" }}
-          onClick={async () => { await fetch(`${API}/auth/logout`, { method: "POST", credentials: "include" }); location.reload(); }}
+          style={{ position: "fixed", bottom: 12, right: 16, zIndex: 100, background: "none", border: 0, cursor: "pointer" }}
+          onClick={async () => {
+            await fetch(`${API}/auth/logout`, { method: "POST", credentials: "include" }).catch(() => {});
+            setPw("");
+            setCode("");
+            setState("email");
+          }}
         >
           {email} · Sign out
         </button>

@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 export const API = process.env.NEXT_PUBLIC_API_BASE ?? "";
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(API + path, { headers: { "Content-Type": "application/json" }, ...init });
+  const r = await fetch(API + path, { credentials: "include", headers: { "Content-Type": "application/json" }, ...init });
   if (!r.ok) {
     let msg = r.statusText;
     try { msg = (await r.json()).detail ?? msg; } catch {}
