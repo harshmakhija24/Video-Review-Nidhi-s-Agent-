@@ -36,6 +36,11 @@ export default function Rulebook() {
   const [bt, setBt] = useState<Backtest>({ results: [] });
   const [jobs, setJobs] = useState<Job[]>([]);
   const [toast, setToast] = useState("");
+  const [showAdd, setShowAdd] = useState(false);
+  const [newCat, setNewCat] = useState("relevance");
+  const [newRule, setNewRule] = useState("");
+  const [newNote, setNewNote] = useState("");
+  const [adding, setAdding] = useState(false);
 
   const load = useCallback(async () => {
     const [rb, b, j] = await Promise.all([
@@ -70,6 +75,28 @@ export default function Rulebook() {
     try { await api(path, { method: "POST" }); flash(msg); load(); } catch (e) { flash((e as Error).message); }
   };
 
+  const handleAddRule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newRule.trim()) return;
+    setAdding(true);
+    try {
+      const rb = await api<{ rules: Rule[]; updated: string | null }>("/api/rulebook/add", {
+        method: "POST",
+        body: JSON.stringify({ category: newCat, rule: newRule.trim(), example_note: newNote.trim() }),
+      });
+      if (rb.rules?.length) setRules(rb.rules);
+      setUpdated(rb.updated);
+      setNewRule("");
+      setNewNote("");
+      setShowAdd(false);
+      flash("Added new rule to Nidhi's rulebook!");
+    } catch (e) {
+      flash((e as Error).message);
+    } finally {
+      setAdding(false);
+    }
+  };
+
   const observed = rules?.filter((r) => r.basis === "observed") ?? [];
   const predicted = (rules?.filter((r) => r.basis === "predicted") ?? []).sort((a, b) => b.confidence - a.confidence);
   const scored = bt.results.filter((r) => r.outcome !== "no video available");
@@ -87,10 +114,63 @@ export default function Rulebook() {
             hasn&rsquo;t written yet but her standards imply. Switch off any prediction that&rsquo;s wrong; it stops being applied immediately.
           </p>
         </div>
-        <button id="btn-learn" className="btn btn-primary" disabled={!!learnJob} onClick={() => start("/api/rulebook/learn", "Re-learning from the sheet…")}>
-          {learnJob ? <span className="spin" /> : <Icon.refresh />} {learnJob ? "Learning…" : "Re-learn from sheet"}
-        </button>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <a
+            href="https://docs.google.com/spreadsheets/d/115EloGl-euhjooZLgi7rarHPh57oGeHf_2eSyX1fCtk/edit"
+            target="_blank"
+            rel="noreferrer"
+            className="btn"
+          >
+            <Icon.link /> Google Sheet ↗
+          </a>
+          <button type="button" className="btn" onClick={() => setShowAdd(!showAdd)}>
+            <Icon.plus /> {showAdd ? "Close" : "Add Rule"}
+          </button>
+          <button id="btn-learn" className="btn btn-primary" disabled={!!learnJob} onClick={() => start("/api/rulebook/learn", "Re-learning from the sheet…")}>
+            {learnJob ? <span className="spin" /> : <Icon.refresh />} {learnJob ? "Learning…" : "Re-learn from sheet"}
+          </button>
+        </div>
       </header>
+
+      {showAdd && (
+        <form onSubmit={handleAddRule} className="panel panel-pad" style={{ marginTop: 22, display: "grid", gap: 12 }}>
+          <div className="h2">Add a new rule directly</div>
+          <div style={{ display: "grid", gridTemplateColumns: "180px 1fr", gap: 10 }}>
+            <select
+              value={newCat}
+              onChange={(e) => setNewCat(e.target.value)}
+              className="textarea"
+              style={{ minHeight: 42, padding: "8px 12px" }}
+            >
+              {["captions", "grading", "structure", "relevance", "pacing", "audio", "animation", "text", "branding", "other"].map((c) => (
+                <option key={c} value={c} style={{ background: "#141621" }}>{c}</option>
+              ))}
+            </select>
+            <input
+              type="text"
+              required
+              placeholder="Rule she enforces (e.g. Never use declining graphs in b-roll animations)"
+              value={newRule}
+              onChange={(e) => setNewRule(e.target.value)}
+              className="textarea"
+              style={{ minHeight: 42, padding: "8px 12px" }}
+            />
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <input
+              type="text"
+              placeholder="Optional: her exact comment / quote for reference"
+              value={newNote}
+              onChange={(e) => setNewNote(e.target.value)}
+              className="textarea"
+              style={{ minHeight: 42, padding: "8px 12px", flex: 1 }}
+            />
+            <button type="submit" className="btn btn-primary" disabled={adding}>
+              {adding ? "Saving…" : "Save Rule"}
+            </button>
+          </div>
+        </form>
+      )}
 
       <section style={{ marginTop: 30 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 14 }}>

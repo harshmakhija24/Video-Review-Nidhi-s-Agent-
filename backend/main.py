@@ -183,6 +183,30 @@ def sync_data():
         raise HTTPException(502, f"Failed to sync with Google Sheet: {e}")
 
 
+class AddReelRequest(BaseModel):
+    reel: str
+    editor: str = ""
+    link: str = ""
+    notes: str = ""
+    start_review: bool = False
+
+
+@app.post("/api/reels/add")
+def add_reel_resource(req: AddReelRequest):
+    if not req.reel.strip():
+        raise HTTPException(400, "Reel name is required")
+    if req.link.strip():
+        _safe_url(req.link.strip())
+    nidhi.add_custom_reel(req.reel, req.editor, req.link, req.notes)
+    revisions.get_all_revisions(refresh_from_reports=True)
+    job = None
+    if req.start_review and req.link.strip():
+        fid = review.file_id(req.link.strip())
+        job = enqueue("review", url=req.link.strip(), file_id=fid, reel=req.reel.strip(),
+                      meta={"reel": req.reel.strip(), "editor": req.editor.strip()})
+    return {"ok": True, "job": job}
+
+
 class ReviewRequest(BaseModel):
     urls: List[str] = []
     reels: List[str] = []
@@ -290,6 +314,21 @@ def learn():
 
 class Decision(BaseModel):
     status: str
+
+
+class NewRuleRequest(BaseModel):
+    category: str = "other"
+    rule: str
+    example_note: str = ""
+    reel: str = "-"
+    editor: str = "-"
+
+
+@app.post("/api/rulebook/add")
+def add_rule(req: NewRuleRequest):
+    if not req.rule.strip():
+        raise HTTPException(400, "Rule text is required")
+    return nidhi.add_manual_rule(req.category, req.rule, req.example_note, req.reel, req.editor)
 
 
 @app.post("/api/rulebook/{rule_id}")

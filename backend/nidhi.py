@@ -143,7 +143,76 @@ def reels() -> list[dict]:
                     "link": link, "file_id": fid,
                     "drive_name": dname, "version": ver,
                     "v2_confirmed": bool(locked_v2 and locked_v2.get("confirmed"))})
+
+    seen_names = {x["reel"] for x in out}
+
+    # Include any custom reels added directly via the dashboard UI
+    custom_p = DATA / "custom_reels.json"
+    custom_list = json.loads(custom_p.read_text(encoding="utf-8")) if custom_p.exists() else []
+    for c in custom_list:
+        cname = c.get("reel", "").strip()
+        if not cname or cname in seen_names:
+            continue
+        seen_names.add(cname)
+        f = files.get(cname)
+        link = c.get("link", "").strip() or (f"https://drive.google.com/file/d/{f['id']}/view" if f else "")
+        fid = review.file_id(link) if link else None
+        out.append({
+            "reel": cname,
+            "status": c.get("status") or "Yet to review",
+            "editor": c.get("editor") or "",
+            "notes": c.get("notes") or "",
+            "link": link,
+            "file_id": fid,
+            "drive_name": f["name"] if f else f"{cname}.mp4",
+            "version": f["version"] if f else 1,
+            "v2_confirmed": False,
+        })
+
+    # Auto-discover any video uploaded to the Google Drive folder that isn't in the sheet yet
+    for base, f in sorted(files.items()):
+        if base not in seen_names:
+            seen_names.add(base)
+            link = f"https://drive.google.com/file/d/{f['id']}/view"
+            out.append({
+                "reel": base,
+                "status": "Yet to review",
+                "editor": "",
+                "notes": "",
+                "link": link,
+                "file_id": f["id"],
+                "drive_name": f["name"],
+                "version": f["version"],
+                "v2_confirmed": False,
+            })
+
     return out
+
+
+def add_custom_reel(reel: str, editor: str = "", link: str = "", notes: str = "") -> dict:
+    """Adds or updates a reel directly from the UI without needing to edit the Google Sheet."""
+    DATA.mkdir(exist_ok=True)
+    custom_p = DATA / "custom_reels.json"
+    custom_list = json.loads(custom_p.read_text(encoding="utf-8")) if custom_p.exists() else []
+    reel = reel.strip()
+    existing = next((c for c in custom_list if c.get("reel") == reel), None)
+    if existing:
+        if editor:
+            existing["editor"] = editor.strip()
+        if link:
+            existing["link"] = link.strip()
+        if notes:
+            existing["notes"] = notes.strip()
+    else:
+        custom_list.append({
+            "reel": reel,
+            "status": "Yet to review",
+            "editor": editor.strip(),
+            "notes": notes.strip(),
+            "link": link.strip(),
+        })
+    custom_p.write_text(json.dumps(custom_list, indent=1, ensure_ascii=False), encoding="utf-8")
+    return {"ok": True, "reel": reel}
 
 
 def sync_sheet_and_drive() -> list[dict]:
@@ -260,6 +329,26 @@ def decide_rule(rule_id: str, status: str) -> dict:
     for r in rb["rules"]:
         if r["id"] == rule_id:
             r["status"], r["decided"] = status, True
+    save_rulebook(rb)
+    return rb
+
+
+def add_manual_rule(category: str, rule_text: str, example_note: str = "", reel: str = "-", editor: str = "-") -> dict:
+    """Adds a new observed rule directly from the UI to rulebook.json."""
+    rb = load_rulebook()
+    slug = re.sub(r"[^a-z0-9]+", "_", rule_text.lower()).strip("_")[:32] or f"rule_{int(time.time())}"
+    have = {r["id"] for r in rb["rules"]}
+    rid = slug if slug not in have else f"{slug}_{int(time.time()) % 1000}"
+    examples = [{"reel": reel or "-", "editor": editor or "-", "note": example_note.strip()}] if example_note.strip() else []
+    rb["rules"].insert(0, {
+        "id": rid,
+        "category": category.strip() or "other",
+        "rule": rule_text.strip(),
+        "examples": examples,
+        "basis": "observed",
+        "status": "active",
+        "confidence": 1.0,
+    })
     save_rulebook(rb)
     return rb
 

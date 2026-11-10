@@ -874,15 +874,35 @@ function NotesRepoContent() {
       )}
 
       {/* Header */}
-      <header className="mb-8">
-        <div className="eyebrow">Revision Tracker &amp; Notes Repository</div>
-        <h1 className="h1">
-          Review 1 &amp; Review 2 <em>Notes Desk</em>
-        </h1>
-        <p className="lede">
-          Track corrections across iterations. Video editors tick changes made, Nidhi verifies and
-          approves, and unresolved notes roll forward cleanly into Review 2.
-        </p>
+      <header className="mb-8 flex items-end justify-between gap-4 flex-wrap">
+        <div>
+          <div className="eyebrow">Revision Tracker &amp; Notes Repository</div>
+          <h1 className="h1">
+            Review 1 &amp; Review 2 <em>Notes Desk</em>
+          </h1>
+          <p className="lede">
+            Track corrections across iterations. Video editors tick changes made, Nidhi verifies and
+            approves, and unresolved notes roll forward cleanly into Review 2.
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <a
+            href="https://docs.google.com/spreadsheets/d/115EloGl-euhjooZLgi7rarHPh57oGeHf_2eSyX1fCtk/edit"
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn-sm"
+          >
+            <Icon.link /> Google Sheet ↗
+          </a>
+          <a
+            href="https://drive.google.com/drive/folders/1cy0v_6yXtuwbMuldn0nvRUGyQIJg0jSD"
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn-sm"
+          >
+            <Icon.link /> Drive Folder ↗
+          </a>
+        </div>
       </header>
 
       {/* Stats Cards */}

@@ -67,6 +67,10 @@ export default function Desk() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [showAddReel, setShowAddReel] = useState(false);
+  const [newReelName, setNewReelName] = useState("");
+  const [newReelEditor, setNewReelEditor] = useState("");
+  const [newReelLink, setNewReelLink] = useState("");
 
   const flash = (m: string) => { setToast(m); setTimeout(() => setToast(""), 3200); };
 
@@ -139,14 +143,102 @@ export default function Desk() {
 
   return (
     <div className="page">
-      <header>
-        <div className="eyebrow">FDP · Final review</div>
-        <h1 className="h1">The review desk that <em>thinks like Nidhi</em></h1>
-        <p className="lede">
-          Paste reel links or pull the &ldquo;Yet to review&rdquo; list from the sheet. The agent listens to the audio, reads every caption,
-          watches the shots and transitions, and writes timestamped notes in Nidhi&rsquo;s voice - including the things she hasn&rsquo;t said yet but would.
-        </p>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}>
+        <div>
+          <div className="eyebrow">FDP · Final review</div>
+          <h1 className="h1">The review desk that <em>thinks like Nidhi</em></h1>
+          <p className="lede">
+            Paste reel links or pull the &ldquo;Yet to review&rdquo; list from the sheet. The agent listens to the audio, reads every caption,
+            watches the shots and transitions, and writes timestamped notes in Nidhi&rsquo;s voice - including the things she hasn&rsquo;t said yet but would.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <a
+            href="https://docs.google.com/spreadsheets/d/115EloGl-euhjooZLgi7rarHPh57oGeHf_2eSyX1fCtk/edit"
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn-sm"
+          >
+            <Icon.link /> Google Sheet ↗
+          </a>
+          <a
+            href="https://drive.google.com/drive/folders/1cy0v_6yXtuwbMuldn0nvRUGyQIJg0jSD"
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn-sm"
+          >
+            <Icon.link /> Drive Folder ↗
+          </a>
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => setShowAddReel(!showAddReel)}>
+            <Icon.plus /> {showAddReel ? "Close" : "Add Reel"}
+          </button>
+        </div>
       </header>
+
+      {showAddReel && (
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (!newReelName.trim()) return;
+            setBusy(true);
+            try {
+              await api("/api/reels/add", {
+                method: "POST",
+                body: JSON.stringify({
+                  reel: newReelName.trim(),
+                  editor: newReelEditor.trim(),
+                  link: newReelLink.trim(),
+                  start_review: !!newReelLink.trim(),
+                }),
+              });
+              flash(`Added Reel ${newReelName.trim()}!`);
+              setNewReelName("");
+              setNewReelEditor("");
+              setNewReelLink("");
+              setShowAddReel(false);
+              await load();
+            } catch (err) {
+              flash((err as Error).message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+          className="panel panel-pad"
+          style={{ marginTop: 18, display: "grid", gap: 12 }}
+        >
+          <div className="h2">Add a reel directly (without editing Google Sheet)</div>
+          <div style={{ display: "grid", gridTemplateColumns: "140px 160px 1fr auto", gap: 10, alignItems: "center" }}>
+            <input
+              type="text"
+              required
+              placeholder="Reel (e.g. 10_01)"
+              value={newReelName}
+              onChange={(e) => setNewReelName(e.target.value)}
+              className="textarea"
+              style={{ minHeight: 40, padding: "8px 12px" }}
+            />
+            <input
+              type="text"
+              placeholder="Editor (e.g. Ashick)"
+              value={newReelEditor}
+              onChange={(e) => setNewReelEditor(e.target.value)}
+              className="textarea"
+              style={{ minHeight: 40, padding: "8px 12px" }}
+            />
+            <input
+              type="url"
+              placeholder="Google Drive video URL (optional if in Drive folder)"
+              value={newReelLink}
+              onChange={(e) => setNewReelLink(e.target.value)}
+              className="textarea"
+              style={{ minHeight: 40, padding: "8px 12px" }}
+            />
+            <button type="submit" className="btn btn-primary" disabled={busy}>
+              Save &amp; Review
+            </button>
+          </div>
+        </form>
+      )}
 
       <section className="grid-stats">
         {[
