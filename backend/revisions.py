@@ -96,6 +96,15 @@ def sync_report_to_revision(rep: dict):
         }
     else:
         entry = data[key]
+        prev = (
+            {(n.get("rule"), round(float(n.get("t", 0)))): n for n in entry.get("notes", []) if n.get("basis") != "manual"}
+            if entry.get("report_file_id") == fid else {}
+        )
+        for n in new_notes:
+            old = prev.get((n.get("rule"), round(float(n.get("t", 0)))))
+            if old:
+                for k in ("editor_done", "editor_comment", "nidhi_verified", "nidhi_comment"):
+                    n[k] = old.get(k, n[k])
         if fid:
             entry["file_id"] = fid
             entry["report_file_id"] = fid

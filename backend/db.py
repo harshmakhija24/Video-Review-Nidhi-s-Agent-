@@ -13,6 +13,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+load_dotenv(Path(__file__).with_name(".env"))
 load_dotenv()
 
 _raw_url = (
@@ -40,7 +41,15 @@ def status() -> dict:
 
 def _connect():
     import psycopg
-    return psycopg.connect(DB_URL, autocommit=True, connect_timeout=10)
+    try:
+        return psycopg.connect(DB_URL, autocommit=True, connect_timeout=10)
+    except Exception:
+        if "channel_binding=require" in DB_URL:
+            return psycopg.connect(
+                DB_URL.replace("channel_binding=require", "channel_binding=prefer"),
+                autocommit=True, connect_timeout=10,
+            )
+        raise
 
 
 def _exec(fn):
@@ -136,3 +145,4 @@ def hydrate(data_dir: Path) -> int:
 if __name__ == "__main__":
     assert status()["configured"] == bool(DB_URL)
     print("db.py self-check ok;", status())
+
