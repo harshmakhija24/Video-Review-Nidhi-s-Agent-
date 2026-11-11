@@ -1,6 +1,51 @@
 {
  "rules": [
   {
+   "id": "too_many_broll",
+   "category": "pacing",
+   "rule": "Too many b-rolls / too much happening at once is overwhelming - keep the professor on screen and use cutaways sparingly.",
+   "examples": [
+    {
+     "reel": "-",
+     "editor": "-",
+     "note": "too many b rolls it becomes overwhelming"
+    }
+   ],
+   "basis": "observed",
+   "status": "active",
+   "confidence": 1.0
+  },
+  {
+   "id": "jarring_visuals",
+   "category": "relevance",
+   "rule": "No sudden, alarming or negative imagery in cutaways (e.g. a barking dog with red bared teeth popping up on the word 'bark').",
+   "examples": [
+    {
+     "reel": "-",
+     "editor": "-",
+     "note": "a dog bark was the word and a red sudden barking teeth came up which feels weird and also negative"
+    }
+   ],
+   "basis": "observed",
+   "status": "active",
+   "confidence": 1.0
+  },
+  {
+   "id": "no_negative_graphs",
+   "category": "relevance",
+   "rule": "Never use graphs or arrows going down / declining charts in the b-roll animations - at any cost.",
+   "examples": [
+    {
+     "reel": "-",
+     "editor": "-",
+     "note": "graphs going down shouldn't be taken in the b roll animations at any cost"
+    }
+   ],
+   "basis": "observed",
+   "status": "active",
+   "confidence": 1.0
+  },
+  {
    "id": "captions_missing",
    "category": "captions",
    "rule": "Every spoken line must have a caption on screen - no gaps, especially at the start.",
@@ -161,5 +206,5 @@
    "examples": []
   }
  ],
- "updated": "2026-10-26 12:37"
+ "updated": "2026-11-12 00:00"
 }

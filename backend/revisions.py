@@ -108,7 +108,7 @@ def sync_report_to_revision(rep: dict):
     _save_raw(data)
 
 
-def get_all_revisions(refresh_from_reports: bool = True) -> Dict[str, Any]:
+def get_all_revisions(refresh_from_reports: bool = True, sheet_reels: Optional[list] = None) -> Dict[str, Any]:
     """Returns all tracked reel revisions, populating any newly finished AI reports and sheet reels."""
     data = _load_raw()
     updated = False
@@ -116,7 +116,8 @@ def get_all_revisions(refresh_from_reports: bool = True) -> Dict[str, Any]:
     # 1. Ensure all reels from Google Sheet are represented first
     if refresh_from_reports:
         try:
-            sheet_reels = nidhi.reels()
+            if sheet_reels is None:
+                sheet_reels = nidhi.reels()
             for r in sheet_reels:
                 key = r.get("reel")
                 if not key:
@@ -144,17 +145,20 @@ def get_all_revisions(refresh_from_reports: bool = True) -> Dict[str, Any]:
                     updated = True
                 else:
                     entry = data[key]
-                    if not entry.get("file_id") and fid:
+                    locked = bool((entry.get("v2_video") or {}).get("confirmed"))
+                    if fid and (not entry.get("file_id") or (not locked and entry.get("status") == "unreviewed" and entry.get("file_id") != fid)):
                         entry["file_id"] = fid
                         updated = True
                     if not entry.get("editor") and editor:
                         entry["editor"] = editor
                         updated = True
-                    if not entry.get("url") and link:
+                    if link and (not entry.get("url") or (not locked and entry.get("status") == "unreviewed" and entry.get("url") != link)):
                         entry["url"] = link
                         updated = True
-                    if not entry.get("sheet_status") and r.get("status"):
+                    if r.get("status") and entry.get("sheet_status") != r.get("status"):
                         entry["sheet_status"] = r.get("status")
+                        if "approved" in sheet_st and entry.get("status") == "unreviewed" and not entry.get("notes"):
+                            entry["status"] = "approved"
                         updated = True
         except Exception:
             pass

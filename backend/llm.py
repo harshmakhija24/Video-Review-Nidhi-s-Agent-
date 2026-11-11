@@ -24,9 +24,16 @@ MAX_WAIT = 90  # seconds; a longer retry-after means a daily cap -> move to the 
 # prompt + max_tokens against TPM, so keep every request well under 8K or it is rejected outright.
 # qwen (vision) also has 200K tokens/day (rolling) - that is the real throughput limit (~14 reels/day).
 
-client = Groq(api_key=os.environ.get("GROQ_API_KEY") or "missing-key", max_retries=0, timeout=180)  # missing key: calls fail cleanly, server still boots
-_exhausted: dict[str, float] = {}  # model -> unix time until which we skip it
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+client = Groq(api_key=GROQ_KEY or "missing-key", max_retries=0, timeout=180)  # missing key: calls fail cleanly, server still boots
+_exhausted: dict[str, float] = {}     # model -> unix time until which we skip it
+_rate_limited: dict[str, float] = {}  # model -> unix time until 429 quota resets
 _lock = threading.Lock()
+last_writer = "groq"
+
+
+def configured() -> bool:
+    return bool(GROQ_KEY)
 
 
 class LLMUnavailable(Exception):
@@ -52,14 +59,18 @@ def _retry_after(err) -> float:
 
 
 def available_at(models: list[str]) -> float:
-    """Unix time when the first model in the chain is usable again (0 = usable now)."""
+    """Unix time when a rate-limited model in the chain resets (0 = usable now or unrecoverable)."""
+    if not GROQ_KEY or not models:
+        return 0.0
     with _lock:
-        t = min(_exhausted.get(m, 0) for m in models)
-    return t if t > time.time() else 0
+        ts = [_rate_limited.get(m, 0) for m in models if _rate_limited.get(m, 0) > time.time()]
+    return min(ts) if ts and len(ts) == len(models) else 0.0
 
 
 def _with_fallback(models: list[str], call, attempts: int = 4):
     """Run call(model) across the model chain. Retries transient errors, skips exhausted/broken models."""
+    if not GROQ_KEY:
+        raise LLMUnavailable("GROQ_API_KEY is not configured")
     last = None
     for model in models:
         with _lock:
@@ -75,7 +86,7 @@ def _with_fallback(models: list[str], call, attempts: int = 4):
                     wait = _retry_after(e) or 2 ** i
                     if wait > MAX_WAIT:  # daily/token cap: park this model, try the next one
                         with _lock:
-                            _exhausted[model] = time.time() + wait
+                            _exhausted[model] = _rate_limited[model] = time.time() + wait
                         log(f"{model} hit its cap (retry in {wait:.0f}s) - switching model")
                         break
                     log(f"{model} rate-limited, waiting {wait:.1f}s")
@@ -117,12 +128,17 @@ def parse_json(text: str):
     if not starts:
         raise ValueError("no JSON in model output")
     start = min(starts)
-    end = max(text.rfind("}"), text.rfind("]"))
-    return json.loads(text[start:end + 1])
+    try:
+        return json.JSONDecoder().raw_decode(text[start:])[0]
+    except json.JSONDecodeError:
+        end = max(text.rfind("}"), text.rfind("]"))
+        return json.loads(text[start:end + 1])
 
 
 def chat_json(system: str, user: str, models: list[str] = TEXT_MODELS, max_tokens: int = 3000):
-    """Text-only chat that must return JSON. Falls back across models."""
+    """Text-only chat that must return JSON. Falls back across Groq models, then Gemini."""
+    global last_writer
+
     def call(model):
         kwargs = {}
         if model.startswith("openai/gpt-oss"):
@@ -133,7 +149,19 @@ def chat_json(system: str, user: str, models: list[str] = TEXT_MODELS, max_token
             temperature=0.2, max_tokens=max_tokens, **kwargs,
         )
         return parse_json(r.choices[0].message.content)
-    return _with_fallback(models, call)
+
+    try:
+        out = _with_fallback(models, call)
+        last_writer = "groq"
+        return out
+    except LLMUnavailable as groq_err:
+        import gemini
+        try:
+            out = gemini.chat_json(system, user, max_tokens=max(max_tokens, 4000))
+            last_writer = "gemini"
+            return out
+        except gemini.Unavailable as gem_err:
+            raise LLMUnavailable(f"{groq_err}; Gemini fallback: {gem_err}")
 
 
 def vision_json(prompt: str, images_b64: list[str], max_tokens: int = 1000):

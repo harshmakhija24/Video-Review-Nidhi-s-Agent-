@@ -102,6 +102,9 @@ export default function Rulebook() {
   const scored = bt.results.filter((r) => r.outcome !== "no video available");
   const good = scored.filter((r) => ["caught", "fix confirmed", "agrees"].includes(r.outcome)).length;
   const learnJob = running("learn"), btJob = running("backtest");
+  const latestLearn = jobs.find((j) => j.kind === "learn");
+  const latestBt = jobs.find((j) => j.kind === "backtest");
+  const failedJob = [latestLearn, latestBt].find((j) => j?.status === "failed");
 
   return (
     <div className="page">
@@ -131,6 +134,13 @@ export default function Rulebook() {
           </button>
         </div>
       </header>
+
+      {failedJob?.error && (
+        <div className="banner c-bad" style={{ marginTop: 18 }}>
+          <Icon.alert className="shrink-0 w-4 h-4" />
+          <div><strong>{failedJob.kind === "learn" ? "Re-learn" : "Backtest"} failed:</strong> {failedJob.error.replace(/^[A-Za-z]+Error:\s*/, "")}</div>
+        </div>
+      )}
 
       {showAdd && (
         <form onSubmit={handleAddRule} className="panel panel-pad" style={{ marginTop: 22, display: "grid", gap: 12 }}>

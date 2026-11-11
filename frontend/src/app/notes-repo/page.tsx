@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { api, API, BASIS_CLASS, Icon, mss, RevisionItem, RevisionNote, SEV_COLOR } from "../lib";
+import { api, API, BASIS_CLASS, Icon, Job, mss, RevisionItem, RevisionNote, SEV_COLOR, stageLabel } from "../lib";
 
 type Filter = "all" | "pending_editor" | "ready_nidhi" | "round_1" | "round_2" | "approved" | "unreviewed";
 
@@ -356,12 +356,14 @@ function ConfirmV2Modal({
 
 function ReelRevisionCard({
   item,
+  job,
   onToggle,
   onConfirmV2,
   onAddNote,
   onStartReview,
 }: {
   item: RevisionItem;
+  job?: Job | null;
   onToggle: (key: string, noteId: string, field: "editor_done" | "nidhi_verified", val: boolean) => Promise<void>;
   onConfirmV2: (key: string, data: { file_id: string; name: string; url: string; start_review: boolean }) => Promise<void>;
   onAddNote: (key: string, text: string) => Promise<void>;
@@ -381,6 +383,15 @@ function ReelRevisionCard({
   const isApproved = (total > 0 && nidhiVerifiedCount === total) || item.status === "approved";
   const isReadyForNidhi = total > 0 && editorDoneCount === total && !isApproved;
   const isUnreviewed = (total === 0 && item.status !== "approved") || item.status === "unreviewed";
+  const isJobRunning = !!job && (job.status === "queued" || job.status === "running" || job.status === "waiting");
+  const isJobFailed = !!job && job.status === "failed";
+  const jobLabel = job
+    ? job.status === "queued"
+      ? "Queued…"
+      : job.status === "waiting"
+      ? "Waiting for vision quota…"
+      : stageLabel(job.stage)
+    : "";
 
   const handleTriggerReview = async () => {
     if (!onStartReview) return;
@@ -440,7 +451,15 @@ function ReelRevisionCard({
               >
                 Review {item.round}
               </span>
-              {isApproved ? (
+              {isJobRunning ? (
+                <span className="chip c-acc text-xs">
+                  <span className="spin" style={{ width: 10, height: 10, borderWidth: 1.5 }} /> {jobLabel}
+                </span>
+              ) : isJobFailed ? (
+                <span className="chip c-bad text-xs" title={job?.error}>
+                  <i /> Review Failed
+                </span>
+              ) : isApproved ? (
                 <span className="chip c-ok text-xs">
                   <i /> Approved &amp; Verified
                 </span>
@@ -483,14 +502,15 @@ function ReelRevisionCard({
 
         {/* Header Actions */}
         <div className="flex items-center gap-2.5 flex-wrap">
-          {isUnreviewed && (item.url || item.file_id) && (
+          {(isUnreviewed || isJobFailed) && (item.url || item.file_id) && (
             <button
               onClick={handleTriggerReview}
-              disabled={startingReview}
+              disabled={startingReview || isJobRunning}
               className="btn btn-sm btn-primary text-xs"
               title="Launch AI Review now"
             >
-              {startingReview ? <span className="spin" /> : "▶"} {startingReview ? "Queuing..." : "Start Review"}
+              {(startingReview || isJobRunning) ? <span className="spin" /> : "▶"}{" "}
+              {startingReview ? "Queuing..." : isJobRunning ? jobLabel : isJobFailed ? "Retry Review" : "Start Review"}
             </button>
           )}
 
@@ -538,19 +558,37 @@ function ReelRevisionCard({
       {/* Body Content */}
       {expanded && (
         <div className="p-5">
+          {isJobFailed && job?.error && (
+            <div className="banner c-bad" style={{ marginBottom: 14 }}>
+              <Icon.alert className="shrink-0 w-4 h-4" />
+              <div style={{ flex: 1 }}>
+                <strong>AI Review failed:</strong> {job.error.replace(/^[A-Za-z]+Error:\s*/, "")}
+              </div>
+            </div>
+          )}
+          {isJobRunning && (
+            <div className="banner c-info" style={{ marginBottom: 14, alignItems: "center" }}>
+              <span className="spin shrink-0" />
+              <div style={{ flex: 1 }}>
+                <strong>AI Review in progress:</strong> {jobLabel}
+              </div>
+            </div>
+          )}
           {item.notes.length === 0 ? (
             <div className="py-8 text-center text-sm text-white/40">
               {isUnreviewed ? (
                 <div style={{ display: "grid", gap: 10, placeItems: "center" }}>
-                  <div>This reel has not been reviewed by the AI agent yet.</div>
+                  <div>{isJobRunning ? `Reviewing reel (${jobLabel})…` : "This reel has not been reviewed by the AI agent yet."}</div>
                   {(item.url || item.file_id) ? (
-                    <button
-                      onClick={handleTriggerReview}
-                      disabled={startingReview}
-                      className="btn btn-sm btn-primary"
-                    >
-                      {startingReview ? <span className="spin" /> : "▶"} {startingReview ? "Queuing Review..." : "Run AI Review Now"}
-                    </button>
+                    !isJobRunning && (
+                      <button
+                        onClick={handleTriggerReview}
+                        disabled={startingReview}
+                        className="btn btn-sm btn-primary"
+                      >
+                        {startingReview ? <span className="spin" /> : "▶"} {startingReview ? "Queuing Review..." : isJobFailed ? "Retry AI Review Now" : "Run AI Review Now"}
+                      </button>
+                    )
                   ) : (
                     <span className="faint text-xs">No video link attached in Google Sheet yet.</span>
                   )}
@@ -661,6 +699,7 @@ function NotesRepoContent() {
   const targetReel = searchParams.get("reel");
 
   const [revisions, setRevisions] = useState<Record<string, RevisionItem>>({});
+  const [jobs, setJobs] = useState<Job[]>([]);
   const [filter, setFilter] = useState<Filter>(initialFilter);
   const [query, setQuery] = useState(targetReel || "");
   const [loading, setLoading] = useState(true);
@@ -674,8 +713,12 @@ function NotesRepoContent() {
 
   const load = useCallback(async () => {
     try {
-      const res = await api<{ revisions: Record<string, RevisionItem> }>("/api/revisions");
+      const [res, jRes] = await Promise.all([
+        api<{ revisions: Record<string, RevisionItem> }>("/api/revisions"),
+        api<{ jobs: Job[] }>("/api/jobs").catch(() => ({ jobs: [] as Job[] })),
+      ]);
       setRevisions(res.revisions || {});
+      setJobs(jRes.jobs || []);
     } catch (e) {
       flash((e as Error).message);
     } finally {
@@ -683,11 +726,25 @@ function NotesRepoContent() {
     }
   }, []);
 
+  const hasActiveJob = useMemo(() => jobs.some((j) => j.status === "queued" || j.status === "running"), [jobs]);
+
   useEffect(() => {
     load();
-    const interval = setInterval(load, 5000);
+    const interval = setInterval(load, hasActiveJob ? 2500 : 6000);
     return () => clearInterval(interval);
-  }, [load]);
+  }, [load, hasActiveJob]);
+
+  const latestJobFor = useMemo(() => {
+    const byFid = new Map<string, Job | null>();
+    const byReel = new Map<string, Job | null>();
+    const asc = [...jobs].filter((j) => j.kind === "review").sort((a, b) => (a.created || 0) - (b.created || 0));
+    for (const j of asc) {
+      const val = j.status === "done" ? null : j;
+      if (j.file_id) byFid.set(j.file_id, val);
+      if (j.reel) byReel.set(j.reel, val);
+    }
+    return (item: RevisionItem) => (item.file_id ? byFid.get(item.file_id) : undefined) ?? byReel.get(item.reel) ?? null;
+  }, [jobs]);
 
   const handleToggle = async (
     key: string,
@@ -745,7 +802,7 @@ function NotesRepoContent() {
   const handleStartReview = async (reelKey: string, url?: string) => {
     try {
       flash(`Starting AI review for Reel ${reelKey}...`);
-      await api("/api/review", {
+      const r = await api<{ queued: Job[] }>("/api/review", {
         method: "POST",
         body: JSON.stringify({
           urls: url ? [url] : [],
@@ -753,7 +810,10 @@ function NotesRepoContent() {
           rerun: true,
         }),
       });
-      flash(`AI Review queued for Reel ${reelKey}!`);
+      if (r.queued?.length) {
+        setJobs((prev) => [...r.queued, ...prev]);
+      }
+      flash(r.queued?.length ? `AI Review queued for Reel ${reelKey}!` : `Reel ${reelKey} is already in the queue.`);
       load();
     } catch (e) {
       flash((e as Error).message);
@@ -1000,6 +1060,7 @@ function NotesRepoContent() {
             <ReelRevisionCard
               key={item.reel}
               item={item}
+              job={latestJobFor(item)}
               onToggle={handleToggle}
               onConfirmV2={handleConfirmV2}
               onAddNote={handleAddNote}

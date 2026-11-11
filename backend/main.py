@@ -28,16 +28,21 @@ app = FastAPI(title="FDP Reel Reviewer", docs_url=None, redoc_url=None, openapi_
 app.middleware("http")(auth.middleware)
 app.include_router(auth.router)
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-                   allow_methods=["*"], allow_headers=["*"])
+                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 MAX_URLS = 50       # per request
 MAX_PENDING = 200   # queued/running/waiting jobs overall
 
 
 def _safe_url(u: str):
-    """SSRF guard: http(s) only, and never a private/loopback/link-local host."""
+    """SSRF + link-type guard: http(s) video links only, never private/loopback or Drive folder/Sheet links."""
     p = urlparse(u)
     if p.scheme not in ("http", "https") or not p.hostname:
         raise HTTPException(400, f"Not a valid http(s) link: {u[:80]}")
+    low = u.lower()
+    if "/drive/folders/" in low or "/folders/" in low:
+        raise HTTPException(400, "That is a Google Drive folder link - paste a video file link (/file/d/...) or click Sync Sheet.")
+    if any(x in low for x in ("docs.google.com/spreadsheets", "docs.google.com/document", "docs.google.com/presentation")):
+        raise HTTPException(400, "That is a Google Sheet/Doc link, not a video file.")
     try:
         addrs = {a[4][0] for a in socket.getaddrinfo(p.hostname, None)}
     except OSError:
@@ -87,29 +92,30 @@ def worker():
         job = jobs.get(jid)
         if not job or job["status"] not in ("queued", "running"):
             continue
-        update(jid, status="running")
+        update(jid, status="running", attempts=job.get("attempts", 0) + 1)
         prog = lambda stage, pct: update(jid, stage=stage, pct=round(pct, 2))
         try:
             if job["kind"] == "review":
                 rep = nidhi.run(job["url"], job.get("meta"), prog)
                 revisions.sync_report_to_revision(rep)
                 update(jid, status="done", stage="done", pct=1, verdict=rep["verdict"], notes=len(rep["notes"]),
-                       reel=rep.get("reel") or job.get("reel"), writer=rep["writer"], partial=rep["partial"])
-                if rep["partial"] and job.get("resumes", 0) < MAX_RESUMES:
+                       reel=rep.get("reel") or job.get("reel"), writer=rep["writer"], partial=rep["partial"], error=None)
+                if rep["partial"] and rep.get("retry_at") and job.get("resumes", 0) < MAX_RESUMES:
                     update(jid, resumes=job.get("resumes", 0) + 1)
                     resume_later(jid, rep["retry_at"])
             elif job["kind"] == "backtest":
                 bt = nidhi.backtest(prog)
-                update(jid, status="done", stage="done", pct=1, partial=bt["partial"])
-                if bt["partial"] and job.get("resumes", 0) < MAX_RESUMES:
+                update(jid, status="done", stage="done", pct=1, partial=bt["partial"], error=None)
+                wait_until = nidhi.llm.available_at(nidhi.llm.VISION_MODELS)
+                if bt["partial"] and wait_until and job.get("resumes", 0) < MAX_RESUMES:
                     update(jid, resumes=job.get("resumes", 0) + 1)
-                    resume_later(jid, nidhi.llm.available_at(nidhi.llm.VISION_MODELS) or time.time() + 600)
+                    resume_later(jid, wait_until)
             elif job["kind"] == "learn":
                 rb = nidhi.learn()
-                update(jid, status="done", stage="done", pct=1, rules=len(rb["rules"]))
+                update(jid, status="done", stage="done", pct=1, rules=len(rb["rules"]), error=None)
         except Exception as e:
             traceback.print_exc()
-            update(jid, status="failed", error=f"{type(e).__name__}: {e}"[:600])
+            update(jid, status="failed", stage="failed", error=f"{type(e).__name__}: {e}"[:600])
 
 
 def enqueue(kind: str, **kw) -> dict:
@@ -123,7 +129,10 @@ def enqueue(kind: str, **kw) -> dict:
 
 # resume anything interrupted by a restart (finished stages are cached on disk, so this is cheap)
 for j in sorted(jobs.values(), key=lambda j: j["created"]):
-    if j["status"] in ("queued", "running"):
+    if j["status"] == "running" and j.get("attempts", 0) >= 2:
+        j["status"], j["stage"] = "failed", "failed"
+        j["error"] = "Server restarted repeatedly while processing this job (memory or timeout limit)."
+    elif j["status"] in ("queued", "running"):
         j["status"] = "queued"
         work.put(j["id"])
 save()
@@ -144,6 +153,20 @@ def _report(fid: str) -> Optional[dict]:
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
+def _latest_review_jobs() -> dict:
+    """Latest active (queued/running/waiting) or failed review job per file_id so errors never vanish silently."""
+    by_fid = {}
+    for j in sorted(jobs.values(), key=lambda j: j.get("created", 0)):
+        if j.get("kind") != "review" or not j.get("file_id"):
+            continue
+        fid = j["file_id"]
+        if j["status"] in ("queued", "running", "waiting", "failed"):
+            by_fid[fid] = j
+        elif j["status"] == "done":
+            by_fid.pop(fid, None)
+    return by_fid
+
+
 # ---------- reels & reviews ----------
 @app.get("/api/reels")
 def get_reels():
@@ -151,8 +174,8 @@ def get_reels():
         rows = nidhi.reels()
     except Exception as e:
         raise HTTPException(503, f"Could not read the review sheet and no cached copy exists: {e}")
-    active = {j.get("file_id"): j for j in jobs.values() if j["kind"] == "review" and j["status"] in ("queued", "running", "waiting")}
-    rev_map = revisions.get_all_revisions(refresh_from_reports=True)
+    active = _latest_review_jobs()
+    rev_map = revisions.get_all_revisions(refresh_from_reports=True, sheet_reels=rows)
     for r in rows:
         rep = _report(r["file_id"]) if r["file_id"] else None
         r["agent"] = {"verdict": rep["verdict"], "notes": len(rep["notes"]), "created": rep["created"]} if rep else None
@@ -177,7 +200,7 @@ def sync_data():
     """Force fresh fetch from Google Sheets and Drive folder, and sync revision items."""
     try:
         rows = nidhi.sync_sheet_and_drive()
-        revisions.get_all_revisions(refresh_from_reports=True)
+        revisions.get_all_revisions(refresh_from_reports=True, sheet_reels=rows)
         return {"ok": True, "count": len(rows), "timestamp": time.time()}
     except Exception as e:
         raise HTTPException(502, f"Failed to sync with Google Sheet: {e}")
@@ -222,16 +245,29 @@ def start_review(req: ReviewRequest):
     except Exception:
         pass
     targets = []
-    for u in req.urls:
-        for u2 in re.split(r"[\s,]+", u.strip()):
-            if u2:
-                _safe_url(u2)
-                fid = review.file_id(u2)
-                targets.append((u2, next((r for r in rows if r["file_id"] == fid), {"reel": None})))
     wanted = set(req.reels)
+    matched_reels = set()
     for r in rows:
         if r["link"] and (r["reel"] in wanted or (req.pending and r["status"].lower() == "yet to review")):
+            _safe_url(r["link"])
             targets.append((r["link"], r))
+            matched_reels.add(r["reel"])
+    if wanted - matched_reels:
+        rev_map = revisions.get_all_revisions(refresh_from_reports=False)
+        for rk in wanted - matched_reels:
+            rev = rev_map.get(rk) or {}
+            link = (rev.get("url") or "").strip() or (f"https://drive.google.com/file/d/{rev['file_id']}/view" if rev.get("file_id") else "")
+            if link:
+                _safe_url(link)
+                targets.append((link, {"reel": rk, "editor": rev.get("editor", "")}))
+                matched_reels.add(rk)
+    if not (wanted and wanted <= matched_reels):
+        for u in req.urls:
+            for u2 in re.split(r"[\s,]+", u.strip()):
+                if u2:
+                    _safe_url(u2)
+                    fid = review.file_id(u2)
+                    targets.append((u2, next((r for r in rows if r["file_id"] == fid), {"reel": next(iter(wanted), None)})))
     if not targets:
         raise HTTPException(400, "Nothing to review - paste Drive/YouTube links or pick reels that have a video.")
     if len(targets) > MAX_URLS and not req.pending:

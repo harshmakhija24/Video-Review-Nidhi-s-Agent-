@@ -8,6 +8,18 @@ type Filter = "all" | "pending" | "reviewed" | "flagged";
 
 function JobProgress({ job }: { job: Job }) {
   const pct = Math.round((job.pct || 0) * 100);
+  if (job.status === "failed") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }} title={job.error || "Review failed"}>
+        <span className="chip c-bad" style={{ alignSelf: "flex-start" }}><i />Failed</span>
+        {job.error && (
+          <span style={{ fontSize: 11, color: "var(--bad)", lineHeight: 1.35, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+            {job.error.replace(/^[A-Za-z]+Error:\s*/, "")}
+          </span>
+        )}
+      </div>
+    );
+  }
   if (job.status === "waiting") {
     const at = job.retry_at ? new Date(job.retry_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "soon";
     return <span className="faint" style={{ fontSize: 12 }}>Partial notes ready · finishing at {at} (Groq vision quota)</span>;
@@ -66,6 +78,7 @@ export default function Desk() {
   const [toast, setToast] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [queuingReel, setQueuingReel] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [showAddReel, setShowAddReel] = useState(false);
   const [newReelName, setNewReelName] = useState("");
@@ -113,14 +126,20 @@ export default function Desk() {
     return () => clearInterval(t);
   }, [load, active]);
 
-  const queue = async (body: object, msg: string) => {
+  const queue = async (body: object, msg: string, rowReel?: string) => {
     setBusy(true);
+    if (rowReel) setQueuingReel(rowReel);
     try {
       const r = await api<{ queued: Job[] }>("/api/review", { method: "POST", body: JSON.stringify(body) });
+      if (r.queued.length) {
+        const byFid = new Map(r.queued.map((j) => [j.file_id, j]));
+        setJobs((prev) => [...r.queued, ...prev]);
+        setReels((prev) => prev ? prev.map((x) => (x.file_id && byFid.has(x.file_id) ? { ...x, job: byFid.get(x.file_id)! } : x)) : prev);
+      }
       flash(r.queued.length ? `${msg} - ${r.queued.length} queued` : "Already in the queue");
       load();
       return true;
-    } catch (e) { flash((e as Error).message); return false; } finally { setBusy(false); }
+    } catch (e) { flash((e as Error).message); return false; } finally { setBusy(false); setQueuingReel(null); }
   };
 
   const stats = useMemo(() => {
@@ -286,8 +305,13 @@ export default function Desk() {
               <tr key={j.id}>
                 <td className="mono" style={{ fontSize: 12.5, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {j.kind === "review" ? (j.reel || j.url) : j.kind === "learn" ? "Re-learning rulebook from sheet" : "Backtest against Nidhi's past reviews"}
+                  {j.status === "failed" && j.error && (
+                    <div style={{ fontFamily: "var(--font-sans)", fontSize: 11.5, color: "var(--bad)", marginTop: 3, whiteSpace: "normal" }}>
+                      {j.error.replace(/^[A-Za-z]+Error:\s*/, "")}
+                    </div>
+                  )}
                 </td>
-                <td style={{ width: 200 }}>{j.status === "done" ? <Verdict v={j.verdict ?? "Done"} /> : j.status === "failed" ? <span className="chip c-bad" title={j.error}>Failed</span> : <JobProgress job={j} />}</td>
+                <td style={{ width: 200 }}>{j.status === "done" ? <Verdict v={j.verdict ?? "Done"} /> : j.status === "failed" ? <span className="chip c-bad" title={j.error}><i />Failed</span> : <JobProgress job={j} />}</td>
                 <td style={{ width: 130, textAlign: "right" }}>{j.status === "done" && j.file_id && <Link className="btn btn-sm" href={`/report?id=${j.file_id}`}>Open report</Link>}</td>
               </tr>
             ))}
@@ -370,8 +394,12 @@ export default function Desk() {
                       <span className="faint">—</span>
                     )}
                   </td>
-                  <td style={{ width: 180 }}>
-                    {r.job ? <JobProgress job={r.job} /> : r.agent ? (
+                  <td style={{ width: 210 }}>
+                    {queuingReel === r.reel ? (
+                      <span className="faint" style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        <span className="spin" /> Queuing…
+                      </span>
+                    ) : r.job ? <JobProgress job={r.job} /> : r.agent ? (
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <Verdict v={r.agent.verdict} /><span className="faint" style={{ fontSize: 12 }}>{r.agent.notes} notes</span>
                       </div>
@@ -389,11 +417,11 @@ export default function Desk() {
                       </button>
                     )}
                     {r.agent && <Link id={`open-${r.reel}`} className="btn btn-sm" href={`/report?id=${r.file_id}`}>Open report</Link>}
-                    {r.file_id && !r.job && (
-                      <button id={`review-${r.reel}`} className={`btn btn-sm ${r.agent ? "btn-ghost" : ""}`} style={{ marginLeft: 6 }} disabled={busy}
-                        title={r.agent ? "Rewrite the notes (cached analysis is reused)" : "Review this reel"}
-                        onClick={() => queue({ reels: [r.reel], rerun: !!r.agent }, `${r.reel} queued`)}>
-                        {r.agent ? <Icon.refresh /> : <><Icon.play /> Review</>}
+                    {r.file_id && (!r.job || r.job.status === "failed") && (
+                      <button id={`review-${r.reel}`} className={`btn btn-sm ${r.agent && r.job?.status !== "failed" ? "btn-ghost" : ""}`} style={{ marginLeft: 6 }} disabled={busy}
+                        title={r.job?.status === "failed" ? "Retry review" : r.agent ? "Rewrite the notes (cached analysis is reused)" : "Review this reel"}
+                        onClick={() => queue({ reels: [r.reel], rerun: true }, `${r.reel} queued`, r.reel)}>
+                        {queuingReel === r.reel ? <span className="spin" /> : r.job?.status === "failed" ? <><Icon.refresh /> Retry</> : r.agent ? <Icon.refresh /> : <><Icon.play /> Review</>}
                       </button>
                     )}
                   </td>

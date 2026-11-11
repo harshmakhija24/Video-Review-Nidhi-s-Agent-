@@ -11,6 +11,7 @@ import time
 import base64
 import difflib
 import hashlib
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -57,9 +58,14 @@ def mss(t: float) -> str:
 def _stage(d: Path, name: str, fn):
     p = d / f"{name}.json"
     if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            p.unlink(missing_ok=True)
     out = fn()
-    p.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
     return out
 
 
@@ -67,35 +73,90 @@ def _words(s: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", s.lower())
 
 
+def is_drive_url(url: str) -> bool:
+    u = url.strip().lower()
+    return any(h in u for h in ("drive.google.com", "drive.usercontent.google.com", "docs.google.com/uc", "docs.google.com/file/d/"))
+
+
+def _drive_confirm_url(html: str, fid: str) -> str | None:
+    """Parse Google Drive's large-file virus-scan confirmation form if returned."""
+    act = re.search(r'<form[^>]+id="download-form"[^>]+action="([^"]+)"', html, re.I) or \
+          re.search(r'<form[^>]+action="(https://drive\.usercontent\.google\.com/download[^"]*)"', html, re.I)
+    if not act:
+        return None
+    params = dict(re.findall(r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"', html, re.I))
+    params.setdefault("id", fid)
+    params.setdefault("export", "download")
+    params.setdefault("confirm", "t")
+    base = act.group(1).replace("&amp;", "&")
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}{urllib.parse.urlencode(params)}"
+
+
+def _download_drive(url: str, d: Path) -> Path:
+    fid = file_id(url)
+    out = d / "video.mp4"
+    tmp = d / "video.mp4.part"
+    dl_url = f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        for attempt in range(2):
+            req = urllib.request.Request(dl_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=600) as r:
+                ct = (r.headers.get("Content-Type") or "").lower()
+                if "text/html" in ct:
+                    html = r.read(262_144).decode("utf-8", "replace")
+                    nxt = _drive_confirm_url(html, fid) if attempt == 0 else None
+                    if nxt:
+                        dl_url = nxt
+                        continue
+                    raise RuntimeError("Drive returned a sign-in/error page instead of the video - share the file as 'Anyone with the link'.")
+                size = 0
+                with open(tmp, "wb") as f:
+                    while chunk := r.read(1 << 20):
+                        size += len(chunk)
+                        if size > MAX_BYTES:
+                            raise RuntimeError(f"Video is larger than {MAX_BYTES // 1_000_000} MB - refusing to download it")
+                        f.write(chunk)
+                if size <= 1024:
+                    raise RuntimeError("Downloaded file from Drive was empty or invalid.")
+                tmp.replace(out)
+                return out
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    raise RuntimeError("Could not download video from Google Drive.")
+
+
 # ---------- 1. download ----------
 def download(url: str, d: Path) -> Path:
-    done = [p for p in d.glob("video.*") if p.suffix not in (".part", ".ytdl")]
-    if done:
-        return done[0]
-    try:
-        opts = {"outtmpl": str(d / "video.%(ext)s"), "quiet": True, "noprogress": True, "format": "best",
-                "noplaylist": True, "max_filesize": MAX_BYTES, "socket_timeout": 30, "retries": 3}
-        with yt_dlp.YoutubeDL(opts) as y:
-            return Path(y.prepare_filename(y.extract_info(url, download=True)))
-    except Exception:
-        if "drive.google" not in url:
-            raise
-    # Fallback: Drive direct download endpoint (works for public files, skips the virus-scan page)
-    out = d / "video.mp4"
-    req = urllib.request.Request(
-        f"https://drive.usercontent.google.com/download?id={file_id(url)}&export=download&confirm=t",
-        headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=600) as r, open(out, "wb") as f:
-        if "text/html" in r.headers.get("Content-Type", ""):
-            raise RuntimeError("Drive returned a web page instead of the video - is the file shared publicly?")
-        size = 0
-        while chunk := r.read(1 << 20):
-            size += len(chunk)
-            if size > MAX_BYTES:
-                f.close()
-                out.unlink(missing_ok=True)
-                raise RuntimeError(f"Video is larger than {MAX_BYTES // 1_000_000} MB - refusing to download it")
-            f.write(chunk)
+    for p in list(d.glob("video.*")):
+        if p.suffix in (".part", ".ytdl"):
+            continue
+        if p.stat().st_size > 1024:
+            return p
+        p.unlink(missing_ok=True)  # remove any 0-byte leftover from an earlier failed download
+
+    opts = {"outtmpl": str(d / "video.%(ext)s"), "quiet": True, "noprogress": True, "format": "best",
+            "noplaylist": True, "max_filesize": MAX_BYTES, "socket_timeout": 30, "retries": 2}
+    if is_drive_url(url):
+        try:
+            return _download_drive(url, d)
+        except Exception as drive_err:
+            try:
+                with yt_dlp.YoutubeDL(opts) as y:
+                    out = Path(y.prepare_filename(y.extract_info(url, download=True)))
+                    if out.exists() and out.stat().st_size > 1024:
+                        return out
+            except Exception:
+                pass
+            raise drive_err
+
+    with yt_dlp.YoutubeDL(opts) as y:
+        out = Path(y.prepare_filename(y.extract_info(url, download=True)))
+    if not out.exists() or out.stat().st_size <= 1024:
+        out.unlink(missing_ok=True)
+        raise RuntimeError("Video download produced an empty file.")
     return out
 
 
@@ -104,6 +165,9 @@ def analyze_media(video: Path, d: Path) -> dict:
     fdir = d / "frames"
     fdir.mkdir(exist_ok=True)
     c = av.open(str(video))
+    if not c.streams.video:
+        c.close()
+        raise ValueError("Downloaded file does not contain a video stream")
     if c.duration and c.duration / 1e6 > MAX_DURATION_S:
         c.close()
         raise ValueError(f"Video is longer than {MAX_DURATION_S // 60} minutes - this tool reviews short reels")
@@ -112,12 +176,13 @@ def analyze_media(video: Path, d: Path) -> dict:
     W, H = vs.codec_context.width, vs.codec_context.height
     fw = 540 if W <= H else 960
     fh = int(round(fw * H / W / 2) * 2)
+    th_h = max(2, int(72 * H / max(W, 1)))
     samples, frames = [], []
     next_s = next_f = 0.0
     for fr in c.decode(vs):
         t = float(fr.time or 0)
         if t >= next_s:
-            samples.append((t, fr.to_ndarray(width=72, height=int(72 * H / W), format="rgb24").astype(np.float32)))
+            samples.append((t, fr.to_ndarray(width=72, height=th_h, format="rgb24")))  # uint8 saves 4x RAM
             next_s += 1 / STATS_FPS
         if t >= next_f:
             name = f"{t:08.3f}.jpg"
@@ -127,9 +192,11 @@ def analyze_media(video: Path, d: Path) -> dict:
     duration = float(c.duration / 1e6) if c.duration else (samples[-1][0] if samples else 0)
     fps = float(vs.average_rate or 0)
     c.close()
+    if not samples:
+        raise ValueError("Could not decode any video frames from file")
 
     # cuts: big jumps in a tiny greyscale thumbnail between consecutive samples
-    grey = [a.mean(axis=2) for _, a in samples]
+    grey = [a.astype(np.float32).mean(axis=2) for _, a in samples]
     diffs = np.array([0.0] + [float(np.abs(grey[i] - grey[i - 1]).mean()) for i in range(1, len(grey))])
     thr = max(18.0, 4 * float(np.median(diffs[1:])) if len(diffs) > 1 else 18.0)  # ponytail: tuned on 1 reel
     cuts = []
@@ -142,7 +209,7 @@ def analyze_media(video: Path, d: Path) -> dict:
     shots = []
     for a, b in zip(bounds, bounds[1:]):
         arrs = [x for t, x in samples if a <= t < b] or [samples[-1][1]]
-        m = np.stack(arrs).reshape(-1, 3)
+        m = np.stack(arrs).reshape(-1, 3).astype(np.float32)
         mx, mn = m.max(axis=1), m.min(axis=1)
         shots.append({
             "start": round(a, 2), "end": round(b, 2),
@@ -150,6 +217,7 @@ def analyze_media(video: Path, d: Path) -> dict:
             "sat": round(float(((mx - mn) / np.maximum(mx, 1)).mean()), 3),
             "warmth": round(float(m[:, 0].mean() - m[:, 2].mean()), 1),
         })
+    del samples, grey
     return {"duration": round(duration, 2), "width": W, "height": H, "fps": round(fps, 2),
             "cuts": cuts, "shots": shots, "frames": frames, **analyze_audio(video, d, shots)}
 
@@ -250,14 +318,22 @@ def gemini_stage(media: dict, d: Path, video: Path | None, progress=None) -> dic
 
 def run_vision(media: dict, d: Path, progress=None, gem: dict | None = None) -> list[dict]:
     p = d / "vision.json"
-    done = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
-    out = {v["t"]: v for v in done if not v.get("skipped")}  # old skips are retried below
+    picked = pick_frames(media)
     moments = (gem or {}).get("moments", [])
-    for f in pick_frames(media):  # Gemini's timeline -> the same per-frame records Groq produces
-        m = min(moments, key=lambda m: abs(m["t"] - f["t"]), default=None)
-        if m and abs(m["t"] - f["t"]) <= 1.0:
-            out[f["t"]] = {**m, "t": f["t"], "file": f["file"]}
-    todo = [f for f in pick_frames(media) if not any(abs(f["t"] - t) < 0.8 for t in out)]
+    if moments:
+        # Gemini already watched the entire continuous video; map each keyframe to its nearest moment
+        out = [{**min(moments, key=lambda m: abs(m["t"] - f["t"])), "t": f["t"], "file": f["file"]} for f in picked]
+        p.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+        return out
+
+    done = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+    out_map = {v["t"]: v for v in done if not v.get("skipped")}  # old skips are retried below
+    todo = [f for f in picked if not any(abs(f["t"] - t) < 0.8 for t in out_map)]
+    if todo and not llm.configured():
+        for f in todo:
+            out_map[f["t"]] = {"skipped": True, "t": f["t"], "file": f["file"]}
+        return sorted(out_map.values(), key=lambda v: v["t"])
+
     batches = [todo[i:i + SHEET_TILES] for i in range(0, len(todo), SHEET_TILES)]
     for bi, batch in enumerate(batches):
         if progress:
@@ -272,9 +348,9 @@ def run_vision(media: dict, d: Path, progress=None, gem: dict | None = None) -> 
         by_n = {r.get("n"): r for r in res if isinstance(r.get("n"), int)}
         for i, f in enumerate(batch):
             v = by_n.get(i + 1) or (res[i] if len(by_n) < len(res) and i < len(res) else None) or {"skipped": True}
-            out[f["t"]] = {**v, "t": f["t"], "file": f["file"]}
-        p.write_text(json.dumps(sorted(out.values(), key=lambda v: v["t"]), indent=1, ensure_ascii=False), encoding="utf-8")
-    return sorted(out.values(), key=lambda v: v["t"])
+            out_map[f["t"]] = {**v, "t": f["t"], "file": f["file"]}
+        p.write_text(json.dumps(sorted(out_map.values(), key=lambda v: v["t"]), indent=1, ensure_ascii=False), encoding="utf-8")
+    return sorted(out_map.values(), key=lambda v: v["t"])
 
 
 # ---------- 4. rule checks (local, no API) ----------
@@ -459,8 +535,8 @@ def review(url: str, progress=None) -> dict:
         skipped.append("vision (Groq vision unavailable - caption, opening-shot and grading checks limited)")
     elif any(v.get("skipped") for v in vision):
         skipped.append(f"vision on {sum(1 for v in vision if v.get('skipped'))} frames")
-    if any(v.get("skipped") for v in vision):  # caller re-runs the review then; finished frames stay cached
-        retry_at = llm.available_at(llm.VISION_MODELS) or time.time() + 600
+    if any(v.get("skipped") for v in vision):  # schedule auto-resume only when Groq vision hit a temporary 429 quota
+        retry_at = llm.available_at(llm.VISION_MODELS)
 
     say("checking", 0)
     findings = run_checks(media, transcript, vision, gem)
@@ -473,6 +549,9 @@ if __name__ == "__main__":
     assert mss(16) == "0.16" and mss(77.6) == "1.18"
     assert file_id("https://drive.google.com/file/d/1VcjsRffEqQewqQmr9GfAVEpcp2b-i7dV/view?usp=x") == "1VcjsRffEqQewqQmr9GfAVEpcp2b-i7dV"
     assert _ranges([1, 2, 3, 9]) == [[1, 3], [9, 9]]
+    assert is_drive_url("https://drive.google.com/file/d/abc1234567890123456789/view")
+    _html = '<form id="download-form" action="https://drive.usercontent.google.com/download" method="get"><input type="hidden" name="id" value="FID"><input type="hidden" name="uuid" value="U1"></form>'
+    assert "uuid=U1" in (_drive_confirm_url(_html, "FID") or "") and "confirm=t" in (_drive_confirm_url(_html, "FID") or "")
     if len(sys.argv) > 1:
         r = review(sys.argv[1], lambda s, p: print(f"  {s} {p:.0%}", flush=True))
         print(json.dumps(r["findings"], indent=1), "\nskipped:", r["skipped"])

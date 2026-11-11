@@ -84,8 +84,14 @@ async def middleware(request: Request, call_next):
             return JSONResponse({"detail": "Not signed in"}, status_code=401)
         if request.method not in ("GET", "HEAD", "OPTIONS"):  # CSRF: state-changing calls must be same-origin
             origin = request.headers.get("origin")
-            if origin and origin.split("://", 1)[-1] != request.headers.get("host"):
-                return JSONResponse({"detail": "Cross-origin request blocked"}, status_code=403)
+            if origin:
+                ohost = origin.split("://", 1)[-1].rstrip("/")
+                allowed_hosts = {h.strip() for raw in (request.headers.get("host", ""), request.headers.get("x-forwarded-host", ""))
+                                 for h in raw.split(",") if h.strip()}
+                local_dev = ohost in ("localhost:3000", "127.0.0.1:3000") and any(
+                    h.startswith(("localhost:", "127.0.0.1:")) or h in ("localhost", "127.0.0.1") for h in allowed_hosts)
+                if ohost not in allowed_hosts and not local_dev:
+                    return JSONResponse({"detail": "Cross-origin request blocked"}, status_code=403)
     return await call_next(request)
 
 

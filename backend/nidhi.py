@@ -44,17 +44,24 @@ SEED_RULES = [
 
 def _get(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=25) as r:
         return r.read().decode("utf-8", "replace")
 
 
-def _cached(name: str, fn):
-    """Fetch fresh; if the network/Google is down, fall back to the last good copy."""
+def _cached(name: str, fn, ttl: float = 60.0, force: bool = False):
+    """Serve recent cache (< ttl s) immediately; refresh when stale/forced; fall back to disk if Google is unreachable."""
     p = DATA / name
+    if not force and p.exists() and time.time() - p.stat().st_mtime < ttl:
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            pass
     try:
         out = fn()
         DATA.mkdir(exist_ok=True)
-        p.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
         return out
     except Exception:
         if p.exists():
@@ -67,56 +74,77 @@ def parse_times(note: str) -> list[float]:
     return [int(m) * 60 + int(s) for m, s in re.findall(r"(?<![\d.])(\d{1,2})[.,:](\d{2})(?!\d)", note or "")]
 
 
-def drive_files() -> dict:
+def _parse_drive_video(tip: str) -> tuple[str, str, int, bool] | None:
+    """Parse Drive tooltip (e.g. '05 _02_v02.mp4 Video') -> (fname, base_reel, version, has_v_tag) or None."""
+    m_ext = re.match(r"^(.+?\.(?:mp4|mov|m4v|webm))\b", (tip or "").strip(), re.I)
+    if not m_ext:
+        return None
+    fname = m_ext.group(1).strip()
+    stem = re.sub(r"\s+", "", Path(fname).stem).strip("_")
+    mv = re.search(r"_v(\d+)$", stem, re.I)
+    base, ver = (stem[:mv.start()], int(mv.group(1))) if mv else (stem, 1)
+    if not re.fullmatch(r"\d+_[A-Za-z0-9]+", base):
+        return None
+    return fname, base, ver, bool(mv)
+
+
+def _fetch_drive_items() -> list[dict]:
+    html = _get(FOLDER_URL)
+    seen_ids = set()
+    items = []
+    for fid, tip in re.findall(r'data-id="([\w-]{20,})"[^>]*data-tooltip="([^"]+)"', html):
+        if fid in seen_ids:
+            continue
+        parsed = _parse_drive_video(tip)
+        if not parsed:
+            continue
+        seen_ids.add(fid)
+        fname, base, ver, has_v = parsed
+        items.append({
+            "base": base,
+            "version": ver,
+            "has_v": has_v,
+            "name": fname,
+            "id": fid,
+            "url": f"https://drive.google.com/file/d/{fid}/view",
+        })
+    return items
+
+
+def drive_files(force: bool = False) -> dict:
     """Reel name -> newest Drive file in the review folder (folder page is public HTML)."""
     def fetch():
-        html = _get(FOLDER_URL)
-        out = {}
-        for fid, tip in re.findall(r'data-id="([\w-]{20,})"[^>]*data-tooltip="([^"]+)"', html):
-            name = re.sub(r"\s+", "", tip.rsplit(" ", 1)[0]).removesuffix(".mp4").strip("_")
-            if not re.match(r"\d", name):
-                continue
-            m = re.search(r"_v(\d+)$", name)
-            base, ver = (name[:m.start()], int(m.group(1))) if m else (name, 1)
-            if base not in out or ver > out[base]["version"]:
-                out[base] = {"id": fid, "name": tip.rsplit(" ", 1)[0], "version": ver}
+        p = DATA / "drive_files.json"
+        prev = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        # Keep prior valid reels if folder grows past Drive's 50-item HTML page; drop stale non-reel/_V1 keys
+        out = {k: v for k, v in prev.items() if isinstance(v, dict) and re.fullmatch(r"\d+_[A-Za-z0-9]+", k)}
+        live: dict = {}
+        for it in _fetch_drive_items():
+            base = it["base"]
+            cur = live.get(base)
+            if not cur or (it["version"], it["has_v"]) > (cur["version"], cur.get("has_v", False)):
+                live[base] = {"id": it["id"], "name": it["name"], "version": it["version"], "has_v": it["has_v"]}
+        out.update(live)
         return out
-    return _cached("drive_files.json", fetch)
+    return _cached("drive_files.json", fetch, force=force)
 
 
 def find_v2_candidates(reel_name: str) -> list[dict]:
-    """Finds all Drive files matching reel_name and their version tags."""
-    def fetch_all():
-        html = _get(FOLDER_URL)
-        out = []
-        for fid, tip in re.findall(r'data-id="([\w-]{20,})"[^>]*data-tooltip="([^"]+)"', html):
-            fname = tip.rsplit(" ", 1)[0]
-            clean = re.sub(r"\s+", "", fname).removesuffix(".mp4").strip("_")
-            m = re.search(r"_v(\d+)$", clean)
-            base = clean[:m.start()] if m else clean
-            ver = int(m.group(1)) if m else 1
-            out.append({
-                "base": base,
-                "version": ver,
-                "name": fname,
-                "id": fid,
-                "url": f"https://drive.google.com/file/d/{fid}/view"
-            })
-        return out
-    all_files = _cached("drive_files_all.json", fetch_all)
+    """Finds all Drive video files matching reel_name and their version tags."""
+    all_files = _cached("drive_files_all.json", _fetch_drive_items)
     matches = [f for f in all_files if f["base"] == reel_name or reel_name in f["name"]]
-    matches.sort(key=lambda x: x["version"], reverse=True)
+    matches.sort(key=lambda x: (x["version"], x.get("has_v", False)), reverse=True)
     return matches
 
 
-def reels() -> list[dict]:
+def reels(force: bool = False) -> list[dict]:
     """Sheet rows merged with Drive files, prioritizing user-confirmed v2 videos."""
     def fetch():
         rows = list(csv.reader(io.StringIO(_get(SHEET_CSV))))
         start = next(i for i, r in enumerate(rows) if r and r[0].strip().lower() == "reels") + 1
         return [r for r in rows[start:] if r and r[0].strip()]
-    rows = _cached("sheet.json", fetch)
-    files = drive_files()
+    rows = _cached("sheet.json", fetch, force=force)
+    files = drive_files(force=force)
 
     rev_p = DATA / "revisions.json"
     rev_data = json.loads(rev_p.read_text(encoding="utf-8")) if rev_p.exists() else {}
@@ -217,24 +245,8 @@ def add_custom_reel(reel: str, editor: str = "", link: str = "", notes: str = ""
 
 def sync_sheet_and_drive() -> list[dict]:
     """Force fresh fetch from Google Sheets CSV and Google Drive folder."""
-    rows_raw = list(csv.reader(io.StringIO(_get(SHEET_CSV))))
-    start = next(i for i, r in enumerate(rows_raw) if r and r[0].strip().lower() == "reels") + 1
-    sheet_rows = [r for r in rows_raw[start:] if r and r[0].strip()]
-    (DATA / "sheet.json").write_text(json.dumps(sheet_rows, indent=1, ensure_ascii=False), encoding="utf-8")
-
-    html = _get(FOLDER_URL)
-    files = {}
-    for fid, tip in re.findall(r'data-id="([\w-]{20,})"[^>]*data-tooltip="([^"]+)"', html):
-        name = re.sub(r"\s+", "", tip.rsplit(" ", 1)[0]).removesuffix(".mp4").strip("_")
-        if not re.match(r"\d", name):
-            continue
-        m = re.search(r"_v(\d+)$", name)
-        base, ver = (name[:m.start()], int(m.group(1))) if m else (name, 1)
-        if base not in files or ver > files[base]["version"]:
-            files[base] = {"id": fid, "name": tip.rsplit(" ", 1)[0], "version": ver}
-    (DATA / "drive_files.json").write_text(json.dumps(files, indent=1, ensure_ascii=False), encoding="utf-8")
-
-    return reels()
+    _cached("drive_files_all.json", _fetch_drive_items, force=True)
+    return reels(force=True)
 
 
 # ---------- rulebook ----------
@@ -277,7 +289,9 @@ def learn(predict: bool = True) -> dict:
                 'If it is an instance of an existing rule return {"id": "<existing id>"}. Otherwise return '
                 '{"id": "<new_snake_case_id>", "category": "captions|grading|structure|relevance|audio|animation|text|branding|pacing|other", '
                 '"rule": "<the general rule she is enforcing, one sentence>"}')
-        except llm.LLMUnavailable:
+        except (llm.LLMUnavailable, AttributeError, TypeError, ValueError):
+            res = {"id": f"note_{x['reel']}", "category": "other", "rule": x["notes"]}
+        if not isinstance(res, dict):
             res = {"id": f"note_{x['reel']}", "category": "other", "rule": x["notes"]}
         ex = {"reel": x["reel"], "editor": x["editor"], "note": x["notes"]}
         rule = next((r for r in rb["rules"] if r["id"] == res.get("id")), None)
@@ -312,14 +326,19 @@ def predict_rules(rb: dict) -> dict:
             "Confidence: how sure you are she'd flag it (0.3-0.85; nothing is certain until she confirms).\n"
             'Return {"rules": [{"id": "snake_case", "category": "...", "rule": "one sentence", "because": "which of her comments implies this", '
             '"confidence": 0.3-0.85}]}', max_tokens=3500)
+        raw_list = res if isinstance(res, list) else (res.get("rules") or res.get("predicted_rules") or []) if isinstance(res, dict) else []
         taken = {r["id"] for r in keep}
-        for r in res.get("rules", []):
-            if r.get("id") and r["id"] not in taken and r.get("rule"):
+        added = 0
+        for r in raw_list:
+            if isinstance(r, dict) and r.get("id") and r["id"] not in taken and r.get("rule"):
                 keep.append({"id": r["id"], "category": r.get("category", "other"), "rule": r["rule"],
                              "because": r.get("because", ""), "confidence": float(r.get("confidence", 0.5)),
                              "basis": "predicted", "status": "active", "examples": []})
-        rb["rules"] = keep
-    except llm.LLMUnavailable:
+                taken.add(r["id"])
+                added += 1
+        if added:
+            rb["rules"] = keep
+    except (llm.LLMUnavailable, AttributeError, TypeError, ValueError):
         pass  # keep the previous predicted rules
     return rb
 
@@ -474,13 +493,13 @@ def write_review(facts: dict, meta: dict) -> dict:
             and findings[n["from_check"]]["rule"] == n["rule"])]
         notes = sorted(notes, key=lambda n: rank.get(n.get("severity"), 3))[:MAX_NOTES]
         used = {n.get("from_check") for n in notes}
-        summary, writer = res.get("summary", ""), "groq"
+        summary, writer = res.get("summary", ""), getattr(llm, "last_writer", "groq")
         if len(notes) < proposed:  # the model's summary may mention notes we just removed
             summary = "; ".join(n["note"] for n in notes[:3]) or "No issues found."
     except (llm.LLMUnavailable, AttributeError, TypeError, ValueError):
         notes = [{**f, "from_check": i} for i, f in enumerate(findings) if f["rule"] != "vision_issue"]
         used, writer = set(range(len(findings))), "fallback"
-        summary = "Automated checks only (Groq writer unavailable) - notes are templated."
+        summary = "Automated checks only (AI writer unavailable) - notes are templated."
     if any(n.get("severity") in ("high", "medium") for n in notes):
         verdict = "Correction"
     else:  # only claim Approved when every check actually ran
@@ -556,5 +575,11 @@ if __name__ == "__main__":
     assert parse_times("0,37 sec to 0.46 sec visuals") == [37, 46]
     assert parse_times("Captions missing in 0.16second") == [16]
     assert parse_times("Grading vs delivery not good on the scooter at 0.07") == [7]
+    assert _parse_drive_video("05 _02_v01.mp4 Video") == ("05 _02_v01.mp4", "05_02", 1, True)
+    assert _parse_drive_video("_09_08A_V1.mp4 Video") == ("_09_08A_V1.mp4", "09_08A", 1, True)
+    assert _parse_drive_video("04_04_v02.mp4 Video") == ("04_04_v02.mp4", "04_04", 2, True)
+    assert _parse_drive_video("4K_Sample  Shortcut to Video") is None
+    assert _parse_drive_video("4K_Sample.mp4 Video") is None
+    assert _parse_drive_video("Review Checklist Google Sheets") is None
     for r in reels():
         print(f"{r['reel']:8} {r['status']:14} {r['editor']:8} v{r['version'] or '-'}  {r['file_id'] or 'NO VIDEO'}")

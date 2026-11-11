@@ -31,8 +31,8 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
             <div style={{ marginTop: "auto" }}>
               <UserStatus />
               <div className="sidebar-foot" style={{ marginTop: 0 }}>
-                <span className="dot-live" />Groq free tier
-                <div className="faint" style={{ marginTop: 4 }}>Vision: qwen3.8-27b · Notes: gpt-oss-120b · Speech: whisper-v3</div>
+                <span className="dot-live" />Gemini + Groq AI
+                <div className="faint" style={{ marginTop: 4 }}>Vision: gemini-3.5-flash · Fallback: qwen3.8-27b · Speech: whisper-v3</div>
               </div>
             </div>
           </aside>

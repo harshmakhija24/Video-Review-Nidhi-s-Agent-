@@ -28,7 +28,9 @@ load_dotenv()
 
 DATA = Path(__file__).parent / "data"
 KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-MODELS = [m.strip() for m in os.environ.get("GEMINI_MODELS", "gemini-3.5-flash,gemini-3.5-flash-lite,gemini-flash-latest").split(",") if m.strip()]
+MODELS = [m.strip() for m in os.environ.get("GEMINI_MODELS", "gemini-3.5-flash,gemini-3.5-flash-lite,gemini-flash-latest,gemini-2.5-flash").split(",") if m.strip()]
+if MODELS and "gemini-2.5-flash" not in MODELS:
+    MODELS.append("gemini-2.5-flash")
 RPM = float(os.environ.get("GEMINI_RPM", "8"))
 DEFAULT_REELS = int(os.environ.get("GEMINI_DAILY_REELS", "100"))   # default reels/day; changeable live in the dashboard
 CALLS_PER_REEL = 4   # hard safety net: retries/model fallbacks can't exceed this many generate calls per allowed reel
@@ -182,12 +184,12 @@ def _client():
     return _client_obj
 
 
-def _generate(client, video_file, prompt: str):
-    """Model chain + retries. Returns parsed JSON dict or raises Unavailable."""
+def _generate(client, contents, system: str | None = None, max_tokens: int = 32768):
+    """Model chain + retries. Returns (parsed JSON, model) or raises Unavailable."""
     from google.genai import types, errors
     import llm  # reuse parse_json
-    cfg = types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2, max_output_tokens=16000,
-                                      http_options=types.HttpOptions(timeout=TIMEOUT_S * 1000))
+    cfg = types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2, max_output_tokens=max_tokens,
+                                      system_instruction=system, http_options=types.HttpOptions(timeout=TIMEOUT_S * 1000))
     last = None
     for model in MODELS:
         if _parked.get(model, 0) > time.time():
@@ -198,7 +200,7 @@ def _generate(client, video_file, prompt: str):
             _pace()
             _bump()
             try:
-                r = client.models.generate_content(model=model, contents=[video_file, prompt], config=cfg)
+                r = client.models.generate_content(model=model, contents=contents, config=cfg)
                 if not r.text:
                     raise ValueError("empty response (blocked or no text)")
                 return llm.parse_json(r.text), model
@@ -232,6 +234,14 @@ def _generate(client, video_file, prompt: str):
                     break
                 time.sleep(2 ** i * 3)
     raise Unavailable(f"all Gemini models failed: {str(last)[:200]}")
+
+
+def chat_json(system: str, user: str, max_tokens: int = 4000):
+    """Text-only JSON call via Gemini (used when Groq is unconfigured or rate-limited)."""
+    if not KEY or not MODELS or time.time() < _open_until:
+        raise Unavailable("Gemini not configured or breaker open")
+    res, _ = _generate(_client(), user, system=system, max_tokens=max_tokens)
+    return res
 
 
 # ---------- output validation ----------
@@ -315,9 +325,9 @@ def _analyze(video: Path, duration: float) -> dict:
                 raise Unavailable(f"video processing {state.lower()}")
             time.sleep(3)
             f = client.files.get(name=f.name)
-        raw, model = _generate(client, f, PROMPT.replace("{dur}", f"{duration:.0f}"))
+        raw, model = _generate(client, [f, PROMPT.replace("{dur}", f"{duration:.0f}")])
         out = sanitize(raw, duration)
-        if len(out["moments"]) < max(5, duration / 8):
+        if len(out["moments"]) < max(2, min(8, int(duration / 15))):
             raise Unavailable(f"too few moments returned ({len(out['moments'])})")
         global _fails
         _fails = 0
