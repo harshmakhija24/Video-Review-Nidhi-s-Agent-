@@ -4,6 +4,7 @@ Every stage is cached as JSON under data/cache/<file_id>/, so a crash, restart o
 resumes where it stopped instead of starting over. Stages that need Groq degrade (they are
 listed in report["skipped"]) instead of failing the review.
 """
+import gc
 import re
 import json
 import wave
@@ -21,6 +22,7 @@ import yt_dlp
 
 import gemini
 import llm
+import db
 
 DATA = Path(__file__).parent / "data"
 CACHE = DATA / "cache"
@@ -66,6 +68,7 @@ def _stage(d: Path, name: str, fn):
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
     tmp.replace(p)
+    db.put(f"stage:{d.name}:{name}", out)
     return out
 
 
@@ -172,9 +175,9 @@ def analyze_media(video: Path, d: Path) -> dict:
         c.close()
         raise ValueError(f"Video is longer than {MAX_DURATION_S // 60} minutes - this tool reviews short reels")
     vs = c.streams.video[0]
-    vs.thread_type = "AUTO"
+    vs.thread_type = "NONE"  # single decode thread keeps peak RAM well below Render's 512 MB limit
     W, H = vs.codec_context.width, vs.codec_context.height
-    fw = 540 if W <= H else 960
+    fw = 360 if W <= H else 640
     fh = int(round(fw * H / W / 2) * 2)
     th_h = max(2, int(72 * H / max(W, 1)))
     samples, frames = [], []
@@ -218,6 +221,7 @@ def analyze_media(video: Path, d: Path) -> dict:
             "warmth": round(float(m[:, 0].mean() - m[:, 2].mean()), 1),
         })
     del samples, grey
+    gc.collect()
     return {"duration": round(duration, 2), "width": W, "height": H, "fps": round(fps, 2),
             "cuts": cuts, "shots": shots, "frames": frames, **analyze_audio(video, d, shots)}
 
@@ -232,20 +236,24 @@ def analyze_audio(video: Path, d: Path, shots: list) -> dict:
     chunks += [r.to_ndarray().reshape(-1) for r in res.resample(None)]
     c.close()
     pcm = np.concatenate(chunks).astype(np.int16) if chunks else np.zeros(1, np.int16)
+    del chunks
     with wave.open(str(d / "audio.wav"), "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(pcm.tobytes())
 
     x = pcm.astype(np.float32) / 32768
     win = 8000  # 0.5 s
     n = len(x) // win
-    db = lambda v: float(20 * np.log10(max(v, 1e-6)))
-    windows = [round(db(np.sqrt(np.mean(x[i * win:(i + 1) * win] ** 2))), 1) for i in range(n)]
+    db_fn = lambda v: float(20 * np.log10(max(v, 1e-6)))
+    windows = [round(db_fn(np.sqrt(np.mean(x[i * win:(i + 1) * win] ** 2))), 1) for i in range(n)]
     for s in shots:
         seg = x[int(s["start"] * 16000):int(s["end"] * 16000)]
-        s["audio_db"] = round(db(np.sqrt(np.mean(seg ** 2))) if len(seg) else -120, 1)
-    return {"has_audio": True, "rms_db": round(db(np.sqrt(np.mean(x ** 2))), 1),
-            "peak_db": round(db(np.abs(x).max()), 1),
-            "clip_pct": round(float((np.abs(pcm) >= 32700).mean() * 100), 3), "windows_db": windows}
+        s["audio_db"] = round(db_fn(np.sqrt(np.mean(seg ** 2))) if len(seg) else -120, 1)
+    rms_db = round(db_fn(np.sqrt(np.mean(x ** 2))), 1)
+    peak_db = round(db_fn(np.abs(x).max()), 1)
+    clip_pct = round(float((np.abs(pcm) >= 32700).mean() * 100), 3)
+    del pcm, x
+    gc.collect()
+    return {"has_audio": True, "rms_db": rms_db, "peak_db": peak_db, "clip_pct": clip_pct, "windows_db": windows}
 
 
 # ---------- 3. vision (Groq, one 6-frame contact sheet per call) ----------
@@ -298,13 +306,17 @@ def _contact_sheet(d: Path, batch: list[dict]) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def gemini_stage(media: dict, d: Path, video: Path | None, progress=None) -> dict:
+def gemini_stage(media: dict, d: Path, video_or_fn, progress=None) -> dict:
     """Whole-video review by Gemini, cached. {} when Gemini isn't configured/available (Groq then does the vision)."""
     p = d / "gemini.json"
     if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
-    if video is None or not gemini.available():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            p.unlink(missing_ok=True)
+    if video_or_fn is None or not gemini.available():
         return {}
+    video = video_or_fn() if callable(video_or_fn) else video_or_fn
     if progress:
         progress("vision", 0)
     try:
@@ -312,11 +324,14 @@ def gemini_stage(media: dict, d: Path, video: Path | None, progress=None) -> dic
     except gemini.Unavailable as e:
         gemini.log(f"unavailable ({e}) - using Groq vision for this reel")
         return {}
-    p.write_text(json.dumps(g, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(g, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
+    db.put(f"stage:{d.name}:gemini", g)
     return g
 
 
-def run_vision(media: dict, d: Path, progress=None, gem: dict | None = None) -> list[dict]:
+def run_vision(media: dict, d: Path, progress=None, gem: dict | None = None, get_video=None) -> list[dict]:
     p = d / "vision.json"
     picked = pick_frames(media)
     moments = (gem or {}).get("moments", [])
@@ -324,6 +339,7 @@ def run_vision(media: dict, d: Path, progress=None, gem: dict | None = None) -> 
         # Gemini already watched the entire continuous video; map each keyframe to its nearest moment
         out = [{**min(moments, key=lambda m: abs(m["t"] - f["t"])), "t": f["t"], "file": f["file"]} for f in picked]
         p.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+        db.put(f"stage:{d.name}:vision", out)
         return out
 
     done = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
@@ -333,6 +349,9 @@ def run_vision(media: dict, d: Path, progress=None, gem: dict | None = None) -> 
         for f in todo:
             out_map[f["t"]] = {"skipped": True, "t": f["t"], "file": f["file"]}
         return sorted(out_map.values(), key=lambda v: v["t"])
+
+    if todo and get_video and not (d / "frames" / todo[0]["file"]).exists():
+        analyze_media(get_video(), d)
 
     batches = [todo[i:i + SHEET_TILES] for i in range(0, len(todo), SHEET_TILES)]
     for bi, batch in enumerate(batches):
@@ -350,7 +369,10 @@ def run_vision(media: dict, d: Path, progress=None, gem: dict | None = None) -> 
             v = by_n.get(i + 1) or (res[i] if len(by_n) < len(res) and i < len(res) else None) or {"skipped": True}
             out_map[f["t"]] = {**v, "t": f["t"], "file": f["file"]}
         p.write_text(json.dumps(sorted(out_map.values(), key=lambda v: v["t"]), indent=1, ensure_ascii=False), encoding="utf-8")
-    return sorted(out_map.values(), key=lambda v: v["t"])
+    final_vis = sorted(out_map.values(), key=lambda v: v["t"])
+    if todo:
+        db.put(f"stage:{d.name}:vision", final_vis)
+    return final_vis
 
 
 # ---------- 4. rule checks (local, no API) ----------
@@ -506,30 +528,59 @@ def run_checks(media: dict, transcript: dict | None, vision: list[dict], gem: di
     return sorted(F, key=lambda f: f["t"])
 
 
+def cleanup_temp_media(fid: str, keep_files: set[str] | None = None):
+    """Remove heavy temp video/audio files after review finishes so ephemeral disk & RAM stay clean."""
+    d = CACHE / fid
+    if not d.exists():
+        return
+    for p in list(d.glob("video.*")) + [d / "audio.wav"]:
+        p.unlink(missing_ok=True)
+    if keep_files is not None and (d / "frames").is_dir():
+        for fp in (d / "frames").glob("*.jpg"):
+            if fp.name not in keep_files:
+                fp.unlink(missing_ok=True)
+    gc.collect()
+
+
 # ---------- orchestration ----------
 def review(url: str, progress=None) -> dict:
-    """Run all local + Groq stages for one reel. Returns the facts the note-writer needs."""
+    """Run all local + Groq/Gemini stages for one reel. Lazily downloads video only if uncached stages need it."""
     fid = file_id(url)
     d = CACHE / fid
     d.mkdir(parents=True, exist_ok=True)
     say = progress or (lambda *a: None)
     skipped = []
+    video_ref: list[Path] = []
 
-    say("downloading", 0)
-    video = download(url, d)
-    say("analysing", 0)
-    media = _stage(d, "media", lambda: analyze_media(video, d))
+    def ensure_video() -> Path:
+        if not video_ref:
+            say("downloading", 0)
+            video_ref.append(download(url, d))
+        return video_ref[0]
 
-    say("transcribing", 0)
+    def build_media() -> dict:
+        v = ensure_video()
+        say("analysing", 0)
+        return analyze_media(v, d)
+
+    media = _stage(d, "media", build_media)
+
     transcript = None
     if media.get("has_audio"):
+        def build_transcript() -> dict:
+            say("transcribing", 0)
+            wav = d / "audio.wav"
+            if not wav.exists():
+                analyze_audio(ensure_video(), d, media["shots"])
+            return llm.transcribe(str(wav))
         try:
-            transcript = _stage(d, "transcript", lambda: llm.transcribe(str(d / "audio.wav")))
+            transcript = _stage(d, "transcript", build_transcript)
         except Exception as e:  # even local whisper failed
             skipped.append(f"transcript ({e})")
 
-    gem = gemini_stage(media, d, video, say)
-    vision = run_vision(media, d, say, gem)
+    gem = gemini_stage(media, d, ensure_video, say)
+    vision = run_vision(media, d, say, gem, get_video=ensure_video)
+    gc.collect()
     retry_at = 0.0
     if not any(not v.get("skipped") for v in vision):
         skipped.append("vision (Groq vision unavailable - caption, opening-shot and grading checks limited)")

@@ -9,3 +9,4 @@ numpy
 pillow
 av
 google-genai
+psycopg[binary]

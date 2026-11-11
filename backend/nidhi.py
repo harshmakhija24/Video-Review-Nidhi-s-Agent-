@@ -1,4 +1,5 @@
 """Everything Nidhi-specific: the review sheet, her rulebook (observed + predicted), notes in her voice, backtest."""
+import os
 import re
 import csv
 import io
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import llm
 import review
+import db
 
 SHEET_CSV = "https://docs.google.com/spreadsheets/d/115EloGl-euhjooZLgi7rarHPh57oGeHf_2eSyX1fCtk/export?format=csv&gid=0"
 FOLDER_URL = "https://drive.google.com/drive/folders/1cy0v_6yXtuwbMuldn0nvRUGyQIJg0jSD"
@@ -240,6 +242,7 @@ def add_custom_reel(reel: str, editor: str = "", link: str = "", notes: str = ""
             "link": link.strip(),
         })
     custom_p.write_text(json.dumps(custom_list, indent=1, ensure_ascii=False), encoding="utf-8")
+    db.put("custom_reels", custom_list)
     return {"ok": True, "reel": reel}
 
 
@@ -264,6 +267,7 @@ def save_rulebook(rb: dict):
     DATA.mkdir(exist_ok=True)
     rb["updated"] = time.strftime("%Y-%m-%d %H:%M")
     RULEBOOK.write_text(json.dumps(rb, indent=1, ensure_ascii=False), encoding="utf-8")
+    db.put("rulebook", rb)
 
 
 def _rules_text(rb: dict, basis: str) -> str:
@@ -533,6 +537,9 @@ def run(url: str, meta: dict | None = None, progress=None) -> dict:
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(rep, indent=1, ensure_ascii=False), encoding="utf-8")
     tmp.replace(p)
+    db.put(f"report:{facts['file_id']}", rep)
+    if not rep["partial"] and os.environ.get("KEEP_LOCAL_VIDEO") != "1":
+        review.cleanup_temp_media(facts["file_id"], {f["file"] for f in rep["frames"]})
     return rep
 
 
@@ -568,6 +575,7 @@ def backtest(progress=None) -> dict:
     out = {"ran": time.strftime("%Y-%m-%d %H:%M"), "results": results,
            "partial": any(x.get("partial") for x in results)}
     (DATA / "backtest.json").write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+    db.put("backtest", out)
     return out
 
 

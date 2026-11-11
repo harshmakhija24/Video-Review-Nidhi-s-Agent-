@@ -33,7 +33,7 @@ function JobProgress({ job }: { job: Job }) {
   );
 }
 
-type Usage = { gemini: { configured: boolean; available: boolean; reels_today: number; daily_reels: number; calls_today: number; calls_cap: number; breaker_open_for_s: number; parked_models: Record<string, number> }; groq_parked: Record<string, number> };
+type Usage = { gemini: { configured: boolean; available: boolean; reels_today: number; daily_reels: number; calls_today: number; calls_cap: number; breaker_open_for_s: number; parked_models: Record<string, number> }; db?: { configured: boolean; connected: boolean }; groq_parked: Record<string, number> };
 
 function UsagePanel() {
   const [u, setU] = useState<Usage | null>(null);
@@ -55,7 +55,16 @@ function UsagePanel() {
     <section className="panel panel-pad" style={{ display: "grid", gap: 12, marginBottom: 18 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div>
-          <div className="h2">Gemini daily limit</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div className="h2">Gemini daily limit</div>
+            {u.db?.connected ? (
+              <span className="chip c-ok"><i />DB connected · permanent storage</span>
+            ) : u.db?.configured ? (
+              <span className="chip c-bad"><i />DB unreachable · check DATABASE_URL</span>
+            ) : (
+              <span className="chip c-warn" title="Set DATABASE_URL on Render to keep reviews across container restarts"><i />Ephemeral disk · set DATABASE_URL</span>
+            )}
+          </div>
           <div className="muted" style={{ fontSize: 13, marginTop: 3 }}>{state} · {g.reels_today} of {g.daily_reels} reels today · {g.calls_today}/{g.calls_cap} API calls (safety cap)</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

@@ -67,9 +67,12 @@ def daily_reels() -> int:
 
 
 def set_daily_reels(n: int) -> int:
+    import db
     n = max(0, min(1000, int(n)))
     DATA.mkdir(exist_ok=True)
-    (DATA / "settings.json").write_text(json.dumps({"daily_reels": n}), encoding="utf-8")
+    obj = {"daily_reels": n}
+    (DATA / "settings.json").write_text(json.dumps(obj), encoding="utf-8")
+    db.put("settings", obj)
     return n
 
 
@@ -87,14 +90,18 @@ def _usage() -> dict:
 
 
 def _bump(key: str = "gemini_calls"):
+    import db
     with _lock:
         u = _usage()
         u[key] += 1
+        snap = dict(u)
         try:
             DATA.mkdir(exist_ok=True)
             (DATA / "usage.json").write_text(json.dumps(u), encoding="utf-8")
         except OSError:  # OneDrive lock etc. - the in-memory limiter below still protects us
             pass
+    if key == "gemini_reels":
+        db.put("usage", snap)
 
 
 def _calls_cap() -> int:

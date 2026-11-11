@@ -2,6 +2,7 @@
 import os
 import socket
 import ipaddress
+import urllib.request
 from urllib.parse import urlparse
 import re
 import json
@@ -12,12 +13,13 @@ import threading
 import traceback
 from typing import Optional, List
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import db
 import nidhi
 import review
 import gemini
@@ -52,29 +54,36 @@ def _safe_url(u: str):
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
             raise HTTPException(400, "Links to private or local addresses are not allowed.")
 
-JOBS_FILE = review.DATA / "jobs.json"
 review.DATA.mkdir(exist_ok=True)
+db.hydrate(review.DATA)
+JOBS_FILE = review.DATA / "jobs.json"
 jobs: dict = json.loads(JOBS_FILE.read_text(encoding="utf-8")) if JOBS_FILE.exists() else {}
 lock = threading.Lock()
 work: "queue.Queue[str]" = queue.Queue()
 
 
-def save():
+def save(sync_db: bool = True):
     with lock:
+        snap = dict(sorted(jobs.items(), key=lambda kv: kv[1].get("created", 0), reverse=True)[:200])
         tmp = JOBS_FILE.with_suffix(".tmp")
+        written = False
         for i in range(20):  # OneDrive/antivirus can hold jobs.json for a moment on Windows
             try:
                 tmp.write_text(json.dumps(jobs, indent=1, ensure_ascii=False), encoding="utf-8")
                 os.replace(tmp, JOBS_FILE)  # atomic: a crash mid-write never corrupts the job list
-                return
+                written = True
+                break
             except PermissionError:
                 time.sleep(0.25)
-        print("[jobs] could not write jobs.json (file locked) - will retry on the next update", flush=True)
+        if not written:
+            print("[jobs] could not write jobs.json (file locked) - will retry on the next update", flush=True)
+    if sync_db:
+        db.put("jobs", snap)
 
 
-def update(jid: str, **kw):
+def update(jid: str, _db: bool = True, **kw):
     jobs[jid].update(kw, updated=time.time())
-    save()
+    save(sync_db=_db)
 
 
 MAX_RESUMES = 48  # partial jobs re-run when the vision quota frees; it trickles back, so one reel may need several
@@ -93,7 +102,7 @@ def worker():
         if not job or job["status"] not in ("queued", "running"):
             continue
         update(jid, status="running", attempts=job.get("attempts", 0) + 1)
-        prog = lambda stage, pct: update(jid, stage=stage, pct=round(pct, 2))
+        prog = lambda stage, pct: update(jid, stage=stage, pct=round(pct, 2), _db=False)
         try:
             if job["kind"] == "review":
                 rep = nidhi.run(job["url"], job.get("meta"), prog)
@@ -284,6 +293,7 @@ def start_review(req: ReviewRequest):
         busy.add(fid)
         if req.rerun and (review.CACHE / fid / "report.json").exists():
             (review.CACHE / fid / "report.json").unlink()
+            db.delete(f"report:{fid}")
         queued.append(enqueue("review", url=url, file_id=fid, reel=meta.get("reel"), meta=meta or None))
     return {"queued": queued}
 
@@ -295,7 +305,7 @@ def get_jobs():
 
 @app.get("/api/usage")
 def get_usage():
-    return {"gemini": gemini.status(),
+    return {"gemini": gemini.status(), "db": db.status(),
             "groq_parked": {m: round(t - time.time()) for m, t in nidhi.llm._exhausted.items() if t > time.time()}}
 
 
@@ -330,11 +340,58 @@ def get_frame(fid: str, name: str):
 
 
 @app.get("/api/video/{fid}")
-def get_video(fid: str):
-    vids = [p for p in (review.CACHE / _safe_id(fid)).glob("video.*") if p.suffix not in (".part", ".ytdl")]
-    if not vids:
+def get_video(fid: str, request: Request):
+    fid = _safe_id(fid)
+    cdir = review.CACHE / fid
+    vids = [p for p in cdir.glob("video.*") if p.suffix not in (".part", ".ytdl")] if cdir.exists() else []
+    if vids and vids[0].stat().st_size > 1024:
+        return FileResponse(vids[0])
+    # Local temp video was cleaned up to save RAM/disk - stream byte-ranges live from Google Drive
+    if len(fid) < 20:
         raise HTTPException(404)
-    return FileResponse(vids[0])
+    dl_url = f"https://drive.usercontent.google.com/download?id={fid}&export=download&confirm=t"
+    req_headers = {"User-Agent": "Mozilla/5.0"}
+    if request.headers.get("range"):
+        req_headers["Range"] = request.headers["range"]
+    upstream = None
+    try:
+        for attempt in range(2):
+            upstream = urllib.request.urlopen(urllib.request.Request(dl_url, headers=req_headers), timeout=60)
+            ct = (upstream.headers.get("Content-Type") or "").lower()
+            if "text/html" in ct:
+                html = upstream.read(262_144).decode("utf-8", "replace")
+                upstream.close()
+                upstream = None
+                nxt = review._drive_confirm_url(html, fid) if attempt == 0 else None
+                if nxt:
+                    dl_url = nxt
+                    continue
+                raise HTTPException(502, "Google Drive video requires public link sharing.")
+            break
+    except HTTPException:
+        raise
+    except Exception as e:
+        if upstream is not None:
+            upstream.close()
+        raise HTTPException(502, f"Could not stream video from Google Drive: {e}")
+    if upstream is None:
+        raise HTTPException(404)
+
+    out_headers = {"Accept-Ranges": "bytes"}
+    for h in ("Content-Length", "Content-Range"):
+        if upstream.headers.get(h):
+            out_headers[h] = upstream.headers[h]
+    media_type = upstream.headers.get("Content-Type") or "video/mp4"
+    status_code = getattr(upstream, "status", 200)
+
+    def _stream():
+        try:
+            while chunk := upstream.read(262_144):
+                yield chunk
+        finally:
+            upstream.close()
+
+    return StreamingResponse(_stream(), status_code=status_code, media_type=media_type, headers=out_headers)
 
 
 # ---------- rulebook & backtest ----------
@@ -471,6 +528,7 @@ def confirm_v2(req: ConfirmV2Request):
             fid = review.file_id(target_url)
             if (review.CACHE / fid / "report.json").exists():
                 (review.CACHE / fid / "report.json").unlink()
+                db.delete(f"report:{fid}")
             job = enqueue("review", url=target_url, reel=req.key, file_id=fid, meta=meta)
         return {"ok": True, "revision": updated, "job": job}
     except Exception as e:

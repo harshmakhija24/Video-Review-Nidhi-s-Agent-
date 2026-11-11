@@ -31,6 +31,7 @@ function ReportView() {
   const [err, setErr] = useState("");
   const [now, setNow] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [noFrames, setNoFrames] = useState(false);
   const video = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
@@ -129,10 +130,24 @@ function ReportView() {
             </div>
             <div className="filmstrip">
               {rep.frames.map((f) => (
-                <div key={f.t} className={`frame ${!f.caption ? "nocap" : ""}`} onClick={() => seek(f.t)} title={`${f.shot ?? ""} · ${f.caption ?? "no caption"}`}>
-                  <img src={`${API}/api/frame/${rep.file_id}/${f.file}`} alt={`Frame at ${mss(f.t)}`} loading="lazy" />
-                  <span>{mss(f.t)}</span>
-                </div>
+                noFrames ? (
+                  <button
+                    key={f.t}
+                    type="button"
+                    onClick={() => seek(f.t)}
+                    title={`${f.shot ?? ""} · ${f.caption ?? "no caption"}`}
+                    className={`chip ${!f.caption ? "c-bad" : ""}`}
+                    style={{ cursor: "pointer", flexShrink: 0 }}
+                  >
+                    <span className="mono">{mss(f.t)}</span>
+                    <span>{f.shot ?? "frame"}</span>
+                  </button>
+                ) : (
+                  <div key={f.t} className={`frame ${!f.caption ? "nocap" : ""}`} onClick={() => seek(f.t)} title={`${f.shot ?? ""} · ${f.caption ?? "no caption"}`}>
+                    <img src={`${API}/api/frame/${rep.file_id}/${f.file}`} alt={`Frame at ${mss(f.t)}`} loading="lazy" onError={() => setNoFrames(true)} />
+                    <span>{mss(f.t)}</span>
+                  </div>
+                )
               ))}
             </div>
           </section>

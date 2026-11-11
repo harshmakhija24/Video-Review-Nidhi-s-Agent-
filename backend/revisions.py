@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 
 import review
 import nidhi
+import db
 
 DATA = review.DATA
 CACHE = review.CACHE
@@ -32,6 +33,7 @@ def _save_raw(data: dict):
         try:
             tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             tmp.replace(REVISIONS_FILE)
+            db.put("revisions", data)
             return
         except OSError:
             time.sleep(0.05)
